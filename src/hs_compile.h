@@ -1211,6 +1211,17 @@ hs_error_t HS_CDECL hs_populate_platform(hs_platform_info_t *platform);
 
 /** @} */
 
+
+/** Compile a Hyperscan database from Eduction-style grammar files, resolving
+ *  <include> + (?A^grammar/entity)/(?A:name) references then hs_compile_multi(). */
+hs_error_t HS_CDECL hs_compile_from_grammar_files(const char *const *paths,
+                                                  unsigned int num_paths,
+                                                  const char *reference,
+                                                  unsigned int flags,
+                                                  unsigned int mode,
+                                                  const hs_platform_info_t *platform,
+                                                  hs_database_t **db,
+                                                  hs_compile_error_t **error);
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

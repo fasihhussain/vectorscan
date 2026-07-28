@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE grammars SYSTEM "edk.dtd">
+<!-- SYNTHETIC fixture — NOT real grammar data. Fake surnames only. -->
+<grammars version="4.0">
+  <grammar name="lastname">
+    <entity name="surnames" type="public">
+      <entry headword="Aardvark"/>
+      <entry headword="Bumblewort"/>
+      <entry headword="Cricketsnap"/>
+    </entity>
+  </grammar>
+</grammars>

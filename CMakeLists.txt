@@ -476,6 +476,10 @@ if (ARCH_ARM32 OR ARCH_AARCH64)
 endif()
 
 SET (hs_compile_SRCS
+    src/grammar/grammar_import.h
+    src/grammar/xml_grammar.cpp
+    src/grammar/reference.cpp
+    src/grammar/grammar_compile.cpp
     ${hs_HEADERS}
     src/crc32.h
     src/database.h

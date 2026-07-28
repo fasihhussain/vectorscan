@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE grammars SYSTEM "edk.dtd">
+<!-- SYNTHETIC fixture — NOT real grammar data. -->
+<grammars version="4.0">
+  <include path="lastname.ecr" type="private"/>
+  <grammar name="fullname">
+    <!-- pure-dictionary entity is resolvable in phase-1 (via the include) -->
+    <!-- composite_demo is a COMPOSITE (its pattern contains references) and MUST be rejected -->
+    <entity name="composite_demo">
+      <pattern>(?A^lastname/surnames)( (?A^lastname/surnames))?</pattern>
+    </entity>
+  </grammar>
+</grammars>
