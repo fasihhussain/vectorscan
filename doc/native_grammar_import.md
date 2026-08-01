@@ -82,5 +82,9 @@ temp directory, so no external data files are needed.
 
 This is phase 1: **whole-file and entity-addressed import**, resolved recursively and safely.
 Composition/combination of entities (an entity built from references to other entities) is intentionally
-left for a follow-up. Converting existing third-party (XML) grammars into `.hsg` is done by a separate
-front-end tool **outside** the library, so the library core stays free of any external format.
+left for a follow-up.
+
+**Input to the library is always `.hsg`.** Grammars that exist in another format (e.g. XML) are expected
+to be converted to `.hsg` **outside** the library first; that conversion is a **separate concern, not
+part of this PR** (a front-end tool to be added separately). Keeping it outside is deliberate — the
+library core stays free of any external format.
