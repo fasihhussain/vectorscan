@@ -52,6 +52,7 @@
 #include "util/depth.h"
 #include "util/popcount.h"
 #include "util/target_info.h"
+#include "grammar/grammar_import.h"
 
 #include <cassert>
 #include <cstddef>
@@ -422,6 +423,39 @@ hs_error_t HS_CDECL hs_compile_multi(const char *const *expressions,
                                      hs_database_t **db,
                                      hs_compile_error_t **error) {
     const hs_expr_ext * const *ext = nullptr; // unused for this call.
+
+    // Native grammar import: any expression flagged HS_FLAG_GRAMMAR_REF names a .hsg grammar file.
+    // Resolve those files' imports (whole-file or entity-addressed, recursively, cycle-safe) into a
+    // plain pattern set, then compile it exactly as a normal multi-pattern input.
+    if (expressions && flags && error) {
+        bool anyGrammar = false;
+        for (unsigned i = 0; i < elements; i++) {
+            if (flags[i] & HS_FLAG_GRAMMAR_REF) {
+                anyGrammar = true;
+                break;
+            }
+        }
+        if (anyGrammar) {
+            vector<string> exprStore;
+            vector<unsigned> exFlags, exIds;
+            string err;
+            if (!grammar::expandGrammarRefs(expressions, flags, ids, elements, exprStore,
+                                            exFlags, exIds, err)) {
+                *db = nullptr;
+                *error = generateCompileError(err, -1);
+                return HS_COMPILER_ERROR;
+            }
+            vector<const char *> exPtrs;
+            exPtrs.reserve(exprStore.size());
+            for (const auto &s : exprStore) {
+                exPtrs.push_back(s.c_str());
+            }
+            return hs_compile_multi_int(exPtrs.data(), exFlags.data(), exIds.data(), ext,
+                                        (unsigned)exPtrs.size(), mode, platform, db, error,
+                                        Grey());
+        }
+    }
+
     return hs_compile_multi_int(expressions, flags, ids, ext, elements, mode,
                                 platform, db, error, Grey());
 }

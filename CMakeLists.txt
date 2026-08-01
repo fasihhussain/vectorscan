@@ -494,6 +494,12 @@ SET (hs_compile_SRCS
     src/compiler/error.cpp
     src/compiler/error.h
     src/compiler/expression_info.h
+    src/grammar/grammar_parser.cpp
+    src/grammar/grammar_parser.h
+    src/grammar/import_resolver.cpp
+    src/grammar/import_resolver.h
+    src/grammar/grammar_import.cpp
+    src/grammar/grammar_import.h
     src/fdr/engine_description.cpp
     src/fdr/engine_description.h
     src/fdr/fdr_compile.cpp
