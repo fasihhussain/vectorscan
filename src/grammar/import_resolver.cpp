@@ -2,12 +2,12 @@
  * Copyright (c) 2026, VectorCamp PC
  * SPDX-License-Identifier: BSD-3-Clause
  *
- * import_resolver.cpp - see import_resolver.h. Plain string / POSIX realpath path handling only.
+ * import_resolver.cpp - see import_resolver.h. Plain string path handling only.
  */
 
 #include "grammar/import_resolver.h"
 
-#include <cstdlib> // realpath, free
+#include <cstdlib> // realpath / _fullpath, free
 #include <set>
 
 namespace ue2 {
@@ -24,8 +24,13 @@ static std::string baseName(const std::string &path) {
 }
 
 // Canonical absolute key for cycle detection (falls back to the raw path if the file is absent).
+// realpath() is POSIX; _fullpath() is its MSVC equivalent. Both allocate and are freed with free().
 static std::string canonical(const std::string &path) {
+#ifdef _WIN32
+    char *r = _fullpath(nullptr, path.c_str(), 0);
+#else
     char *r = realpath(path.c_str(), nullptr);
+#endif
     if (!r) {
         return path;
     }
