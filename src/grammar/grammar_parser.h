@@ -4,7 +4,7 @@
  *
  * grammar_parser.h - parse a single native .hsg grammar file.
  *
- * A .hsg file is Vectorscan's own grammar format (no XML, no external format):
+ * A .hsg file is Vectorscan's own grammar format (not an external/third-party format):
  *   import "other.hsg"            - pull in a whole grammar file
  *   import "other.hsg:entity"     - pull in only one named entity from that file
  *   entity <name>:                - group the following pattern lines under a named entity
