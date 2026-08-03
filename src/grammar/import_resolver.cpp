@@ -23,6 +23,20 @@ static std::string baseName(const std::string &path) {
     return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
+// An import path is absolute if it starts with '/' (POSIX) or a drive letter like "C:\" (Windows).
+static bool isAbsolute(const std::string &p) {
+    if (p.empty()) {
+        return false;
+    }
+    if (p[0] == '/' || p[0] == '\\') {
+        return true;
+    }
+    if (p.size() >= 2 && p[1] == ':') { // e.g. C:\ or C:/
+        return true;
+    }
+    return false;
+}
+
 // Canonical absolute key for cycle detection (falls back to the raw path if the file is absent).
 // realpath() is POSIX; _fullpath() is its MSVC equivalent. Both allocate and are freed with free().
 static std::string canonical(const std::string &path) {
@@ -86,7 +100,10 @@ static bool rec(const std::string &path, const std::string &entity,
         for (const auto &imp : gf.imports) {
             std::string ipath, ient;
             splitSpec(imp, ipath, ient);
-            const std::string child = dir.empty() ? ipath : dir + "/" + ipath;
+            // Relative import paths are resolved against the importing file's directory; absolute
+            // paths are used as-is.
+            const std::string child =
+                (isAbsolute(ipath) || dir.empty()) ? ipath : dir + "/" + ipath;
             if (!rec(child, ient, onStack, done, out, order, err)) {
                 return false;
             }

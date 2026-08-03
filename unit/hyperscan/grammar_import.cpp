@@ -14,7 +14,9 @@
 #include "hs.h"
 
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
+#include <random>
 #include <set>
 #include <string>
 
@@ -61,9 +63,12 @@ static bool scanHas(hs_database_t *db, const std::string &corpus, const std::str
 class GrammarImport : public ::testing::Test {
 protected:
     void SetUp() override {
-        char tmpl[] = "/tmp/hsg_gtest_XXXXXX";
-        ASSERT_NE(nullptr, mkdtemp(tmpl));
-        g_dir = tmpl;
+        // Portable unique temp directory (no POSIX mkdtemp).
+        std::random_device rd;
+        std::filesystem::path dir =
+            std::filesystem::temp_directory_path() / ("hsg_gtest_" + std::to_string(rd()));
+        std::filesystem::create_directories(dir);
+        g_dir = dir.string();
         // a file with two named entities
         writeFile("names.hsg",
                   "entity firstname:\n100:/John/\n101:/Jane/\n"
@@ -83,6 +88,8 @@ protected:
         writeFile("L4.hsg", "540:/level4/\n");
         // SOM letter-flag: /L applied (id 700) vs none (id 701)
         writeFile("som.hsg", "700:/Zeta/L\n701:/Zeta/\n");
+        // malformed .hsg: a line that is neither comment, import, entity, nor a valid pattern
+        writeFile("bad_syntax.hsg", "100:/John/\nthis is not valid\n");
     }
 };
 
@@ -157,6 +164,26 @@ TEST_F(GrammarImport, FlagLetterSom) {
     EXPECT_EQ(0u, s.fromFor701);   // no flag -> start not tracked -> 0
     hs_free_scratch(scratch);
     hs_free_database(db);
+}
+
+// A malformed .hsg (a line that is not a comment/import/entity/pattern) is a clean compile error.
+TEST_F(GrammarImport, MalformedLineIsError) {
+    hs_database_t *db = nullptr;
+    EXPECT_EQ(HS_COMPILER_ERROR, compileHsg("bad_syntax.hsg", &db));
+    EXPECT_EQ(nullptr, db);
+}
+
+// HS_FLAG_GRAMMAR_REF on an expression that is not a .hsg file is a clean error, not compiled as regex.
+TEST_F(GrammarImport, GrammarRefRequiresHsg) {
+    const char *expr[] = { "not_a_grammar.txt" };
+    unsigned flags[]   = { HS_FLAG_GRAMMAR_REF };
+    unsigned ids[]     = { 0 };
+    hs_database_t *db = nullptr;
+    hs_compile_error_t *err = nullptr;
+    EXPECT_EQ(HS_COMPILER_ERROR,
+              hs_compile_multi(expr, flags, ids, 1, HS_MODE_BLOCK, nullptr, &db, &err));
+    EXPECT_EQ(nullptr, db);
+    if (err) hs_free_compile_error(err);
 }
 
 } // namespace

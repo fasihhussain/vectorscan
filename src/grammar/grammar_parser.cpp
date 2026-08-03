@@ -56,7 +56,18 @@ static bool parseEntity(const std::string &line, std::string &name) {
     return !name.empty();
 }
 
-// <id>:/<regex>/<flags>  ->  fills id/regex/flags, or false if the line isn't a pattern.
+// A valid trailing flag character (same set mapFlags() understands / util/ExpressionParser.rl).
+static bool isFlagLetter(char c) {
+    switch (c) {
+    case 'i': case 's': case 'm': case 'H': case 'V': case 'W':
+    case '8': case 'P': case 'L': case 'C': case 'Q':
+        return true;
+    default:
+        return false;
+    }
+}
+
+// <id>:/<regex>/<flags>  ->  fills id/regex/flags, or false if the line isn't a valid pattern.
 static bool parsePattern(const std::string &line, unsigned &id, std::string &regex,
                          std::string &flags) {
     size_t i = 0;
@@ -80,9 +91,16 @@ static bool parsePattern(const std::string &line, unsigned &id, std::string &reg
     if (close <= open) {
         return false;
     }
+    flags = line.substr(close + 1);
+    // The flag field must be ONLY valid flag letters — no trailing text, no inline comment, no
+    // unknown flags. Anything else means the line is not a well-formed pattern (reject -> syntax error).
+    for (char c : flags) {
+        if (!isFlagLetter(c)) {
+            return false;
+        }
+    }
     id = (unsigned)std::strtoul(idStr.c_str(), nullptr, 10);
     regex = line.substr(open + 1, close - open - 1);
-    flags = line.substr(close + 1);
     return true;
 }
 
@@ -95,9 +113,11 @@ bool parseHsgFile(const std::string &path, HsgFile &out, std::string &err) {
     const std::string base = baseName(path);
     std::string curEntity; // patterns before any `entity <name>:` belong to "" (default)
     std::string raw;
+    unsigned lineNo = 0;
     while (std::getline(f, raw)) {
+        lineNo++;
         std::string line = trim(raw);
-        if (line.empty() || line[0] == '#') {
+        if (line.empty() || line[0] == '#') { // blank or whole-line comment
             continue;
         }
         std::string spec, name, regex, flags;
@@ -108,6 +128,10 @@ bool parseHsgFile(const std::string &path, HsgFile &out, std::string &err) {
             curEntity = name;
         } else if (parsePattern(line, id, regex, flags)) {
             out.patterns.push_back({id, regex, flags, base, curEntity});
+        } else {
+            // Not a comment, import, entity header, or valid pattern -> malformed .hsg.
+            err = base + ":" + std::to_string(lineNo) + ": invalid .hsg syntax";
+            return false;
         }
     }
     return true;
