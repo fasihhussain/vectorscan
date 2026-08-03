@@ -90,6 +90,9 @@ protected:
         writeFile("som.hsg", "700:/Zeta/L\n701:/Zeta/\n");
         // malformed .hsg: a line that is neither comment, import, entity, nor a valid pattern
         writeFile("bad_syntax.hsg", "100:/John/\nthis is not valid\n");
+        // strict import syntax: keyword must be followed by whitespace; no trailing junk after the path
+        writeFile("bad_import_kw.hsg", "importwhatever \"names.hsg\"\n");
+        writeFile("bad_import_junk.hsg", "import \"names.hsg\" junk\n");
     }
 };
 
@@ -184,6 +187,16 @@ TEST_F(GrammarImport, GrammarRefRequiresHsg) {
               hs_compile_multi(expr, flags, ids, 1, HS_MODE_BLOCK, nullptr, &db, &err));
     EXPECT_EQ(nullptr, db);
     if (err) hs_free_compile_error(err);
+}
+
+// The import keyword must be followed by whitespace, and no trailing text may follow the path.
+TEST_F(GrammarImport, ImportSyntaxIsStrict) {
+    hs_database_t *db = nullptr;
+    EXPECT_EQ(HS_COMPILER_ERROR, compileHsg("bad_import_kw.hsg", &db)); // importwhatever "names.hsg"
+    EXPECT_EQ(nullptr, db);
+    db = nullptr;
+    EXPECT_EQ(HS_COMPILER_ERROR, compileHsg("bad_import_junk.hsg", &db)); // import "names.hsg" junk
+    EXPECT_EQ(nullptr, db);
 }
 
 } // namespace

@@ -25,10 +25,13 @@ entity firstname:
 entity lastname:
 200:/Smith/
 
-import "other.hsg"              # import a whole grammar file
-import "other.hsg:firstname"    # import only one named entity from that file
+# import a whole grammar file
+import "other.hsg"
+# import only one named entity from that file
+import "other.hsg:firstname"
 
-300:/[0-9]{3}-[0-9]{4}/L        # <id>:/<regex>/<flags>  (flags are Vectorscan flag letters)
+# <id>:/<regex>/<flags>  (flags are Vectorscan flag letters)
+300:/[0-9]{3}-[0-9]{4}/L
 ```
 
 - **`import "file.hsg"`** — pulls in every pattern of that file.
@@ -36,6 +39,9 @@ import "other.hsg:firstname"    # import only one named entity from that file
 - **`entity <name>:`** — groups the following pattern lines under a named entity.
 - **`<id>:/<regex>/<flags>`** — a pattern line. `<flags>` are the same letters Vectorscan already
   uses (`i`, `s`, `m`, `H`, `V`, `W`, `8`, `P`, `L`, `C`, `Q`).
+- **Comments** must be on their **own line** (a line whose first non-blank character is `#`). Inline
+  comments after an `import`, `entity`, or pattern line are **not** supported in Phase 1 — such a line
+  is treated as malformed and produces a clean compile error.
 
 Imports are resolved **recursively**, with **cycle detection** and **de-duplication**. A bad path, an
 import cycle, a reference to a missing entity, or malformed `.hsg` syntax produces a clean
@@ -69,7 +75,7 @@ make -C build -j unit-hyperscan
 ./build/bin/unit-hyperscan --gtest_filter='GrammarImport.*'
 ```
 
-Expected — 7 tests pass:
+Expected — 10 tests pass:
 
 ```
 [ RUN      ] GrammarImport.EntityAddressed           # import "names.hsg:firstname": John matches, Smith does NOT
@@ -79,7 +85,10 @@ Expected — 7 tests pass:
 [ RUN      ] GrammarImport.CycleDetected             # A -> B -> A            -> HS_COMPILER_ERROR, no hang
 [ RUN      ] GrammarImport.MultiLevelChain           # L1 -> L2 -> L3 -> L4 all resolve
 [ RUN      ] GrammarImport.FlagLetterSom             # /L = SOM_LEFTMOST is applied
-[  PASSED  ] 7 tests.
+[ RUN      ] GrammarImport.MalformedLineIsError      # a line that is not comment/import/entity/pattern -> error
+[ RUN      ] GrammarImport.GrammarRefRequiresHsg     # HS_FLAG_GRAMMAR_REF on a non-.hsg expression -> error
+[ RUN      ] GrammarImport.ImportSyntaxIsStrict      # "importX ..." and 'import "..." junk' -> error
+[  PASSED  ] 10 tests.
 ```
 
 The test source is `unit/hyperscan/grammar_import.cpp`; it writes its own small `.hsg` fixtures to a

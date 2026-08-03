@@ -10,6 +10,7 @@
 
 #include "hs_compile.h" // HS_FLAG_*
 
+#include <cctype>
 #include <cstdlib>
 #include <fstream>
 
@@ -30,18 +31,34 @@ static std::string trim(const std::string &s) {
     return s.substr(a, b - a + 1);
 }
 
-// import "<spec>"  ->  returns the spec (between the quotes), or false if not an import line.
+// import "<spec>"  ->  returns the spec (between the quotes), or false if the line is not a
+// well-formed import. Strict: the `import` keyword must be followed by whitespace, then a quoted
+// path, and nothing (except whitespace) after the closing quote — no trailing text, no inline comment.
 static bool parseImport(const std::string &line, std::string &spec) {
     if (line.compare(0, 6, "import") != 0) {
         return false;
     }
-    size_t q1 = line.find('"');
-    if (q1 == std::string::npos) {
+    size_t i = 6;
+    // keyword must be followed by whitespace (rejects e.g. "importwhatever ...")
+    if (i >= line.size() || !isspace((unsigned char)line[i])) {
         return false;
     }
+    while (i < line.size() && isspace((unsigned char)line[i])) {
+        i++;
+    }
+    if (i >= line.size() || line[i] != '"') {
+        return false;
+    }
+    size_t q1 = i;
     size_t q2 = line.find('"', q1 + 1);
     if (q2 == std::string::npos) {
         return false;
+    }
+    // only trailing whitespace may follow the closing quote (rejects `import "x" junk` / inline comment)
+    for (size_t j = q2 + 1; j < line.size(); j++) {
+        if (!isspace((unsigned char)line[j])) {
+            return false;
+        }
     }
     spec = line.substr(q1 + 1, q2 - q1 - 1);
     return true;
