@@ -38,7 +38,14 @@ import "other.hsg:firstname"    # import only one named entity from that file
   uses (`i`, `s`, `m`, `H`, `V`, `W`, `8`, `P`, `L`, `C`, `Q`).
 
 Imports are resolved **recursively**, with **cycle detection** and **de-duplication**. A bad path, an
-import cycle, or a reference to a missing entity produces a clean `hs_compile_error_t` (no crash).
+import cycle, a reference to a missing entity, or malformed `.hsg` syntax produces a clean
+`hs_compile_error_t` (no crash).
+
+**De-duplication is at the import-target level, not the pattern level.** If the same file (or the same
+`file:entity`) is imported more than once along the resolution graph, it is included only once — so a
+diamond `A→B→C` plus `A→C` pulls `C` a single time. It does **not** deduplicate identical individual
+patterns that arrive from *different* files; those are passed through to the compiler as-is (Vectorscan
+handles duplicate patterns normally). This is the intended Phase-1 semantics.
 
 ## Where it lives
 
