@@ -1,0 +1,179 @@
+/*
+ * Copyright (c) 2026, VectorCamp PC
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * grammar_parser.cpp - see grammar_parser.h. Uses only plain string handling (no <regex>/<filesystem>)
+ * to match the rest of the core library.
+ */
+
+#include "grammar/grammar_parser.h"
+
+#include "hs_compile.h" // HS_FLAG_*
+
+#include <cctype>
+#include <cstdlib>
+#include <fstream>
+
+namespace ue2 {
+namespace grammar {
+
+static std::string baseName(const std::string &path) {
+    size_t slash = path.find_last_of("/\\");
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+static std::string trim(const std::string &s) {
+    size_t a = s.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) {
+        return "";
+    }
+    size_t b = s.find_last_not_of(" \t\r\n");
+    return s.substr(a, b - a + 1);
+}
+
+// import "<spec>"  ->  returns the spec (between the quotes), or false if the line is not a
+// well-formed import. Strict: the `import` keyword must be followed by whitespace, then a quoted
+// path, and nothing (except whitespace) after the closing quote — no trailing text, no inline comment.
+static bool parseImport(const std::string &line, std::string &spec) {
+    if (line.compare(0, 6, "import") != 0) {
+        return false;
+    }
+    size_t i = 6;
+    // keyword must be followed by whitespace (rejects e.g. "importwhatever ...")
+    if (i >= line.size() || !isspace((unsigned char)line[i])) {
+        return false;
+    }
+    while (i < line.size() && isspace((unsigned char)line[i])) {
+        i++;
+    }
+    if (i >= line.size() || line[i] != '"') {
+        return false;
+    }
+    size_t q1 = i;
+    size_t q2 = line.find('"', q1 + 1);
+    if (q2 == std::string::npos) {
+        return false;
+    }
+    // only trailing whitespace may follow the closing quote (rejects `import "x" junk` / inline comment)
+    for (size_t j = q2 + 1; j < line.size(); j++) {
+        if (!isspace((unsigned char)line[j])) {
+            return false;
+        }
+    }
+    spec = line.substr(q1 + 1, q2 - q1 - 1);
+    return true;
+}
+
+// entity <name>:  ->  returns <name>, or false if not an entity header.
+static bool parseEntity(const std::string &line, std::string &name) {
+    if (line.compare(0, 7, "entity ") != 0 || line.back() != ':') {
+        return false;
+    }
+    name = trim(line.substr(7, line.size() - 8)); // between "entity " and trailing ':'
+    return !name.empty();
+}
+
+// A valid trailing flag character (same set mapFlags() understands / util/ExpressionParser.rl).
+static bool isFlagLetter(char c) {
+    switch (c) {
+    case 'i': case 's': case 'm': case 'H': case 'V': case 'W':
+    case '8': case 'P': case 'L': case 'C': case 'Q':
+        return true;
+    default:
+        return false;
+    }
+}
+
+// <id>:/<regex>/<flags>  ->  fills id/regex/flags, or false if the line isn't a valid pattern.
+static bool parsePattern(const std::string &line, unsigned &id, std::string &regex,
+                         std::string &flags) {
+    size_t i = 0;
+    if (i >= line.size() || !isdigit((unsigned char)line[i])) {
+        return false;
+    }
+    size_t idStart = i;
+    while (i < line.size() && isdigit((unsigned char)line[i])) {
+        i++;
+    }
+    std::string idStr = line.substr(idStart, i - idStart);
+    if (i >= line.size() || line[i] != ':') {
+        return false;
+    }
+    i++;
+    if (i >= line.size() || line[i] != '/') {
+        return false;
+    }
+    size_t open = i;                       // first '/'
+    size_t close = line.find_last_of('/'); // last '/'
+    if (close <= open) {
+        return false;
+    }
+    flags = line.substr(close + 1);
+    // The flag field must be ONLY valid flag letters — no trailing text, no inline comment, no
+    // unknown flags. Anything else means the line is not a well-formed pattern (reject -> syntax error).
+    for (char c : flags) {
+        if (!isFlagLetter(c)) {
+            return false;
+        }
+    }
+    id = (unsigned)std::strtoul(idStr.c_str(), nullptr, 10);
+    regex = line.substr(open + 1, close - open - 1);
+    return true;
+}
+
+bool parseHsgFile(const std::string &path, HsgFile &out, std::string &err) {
+    std::ifstream f(path);
+    if (!f) {
+        err = "cannot open " + path;
+        return false;
+    }
+    const std::string base = baseName(path);
+    std::string curEntity; // patterns before any `entity <name>:` belong to "" (default)
+    std::string raw;
+    unsigned lineNo = 0;
+    while (std::getline(f, raw)) {
+        lineNo++;
+        std::string line = trim(raw);
+        if (line.empty() || line[0] == '#') { // blank or whole-line comment
+            continue;
+        }
+        std::string spec, name, regex, flags;
+        unsigned id;
+        if (parseImport(line, spec)) {
+            out.imports.push_back(spec);
+        } else if (parseEntity(line, name)) {
+            curEntity = name;
+        } else if (parsePattern(line, id, regex, flags)) {
+            out.patterns.push_back({id, regex, flags, base, curEntity});
+        } else {
+            // Not a comment, import, entity header, or valid pattern -> malformed .hsg.
+            err = base + ":" + std::to_string(lineNo) + ": invalid .hsg syntax";
+            return false;
+        }
+    }
+    return true;
+}
+
+unsigned mapFlags(const std::string &s) {
+    unsigned f = 0;
+    for (char c : s) {
+        switch (c) {
+        case 'i': f |= HS_FLAG_CASELESS;     break;
+        case 's': f |= HS_FLAG_DOTALL;       break;
+        case 'm': f |= HS_FLAG_MULTILINE;    break;
+        case 'H': f |= HS_FLAG_SINGLEMATCH;  break;
+        case 'V': f |= HS_FLAG_ALLOWEMPTY;   break;
+        case 'W': f |= HS_FLAG_UCP;          break;
+        case '8': f |= HS_FLAG_UTF8;         break;
+        case 'P': f |= HS_FLAG_PREFILTER;    break;
+        case 'L': f |= HS_FLAG_SOM_LEFTMOST; break;
+        case 'C': f |= HS_FLAG_COMBINATION;  break;
+        case 'Q': f |= HS_FLAG_QUIET;        break;
+        default: break; // unknown letters ignored
+        }
+    }
+    return f;
+}
+
+} // namespace grammar
+} // namespace ue2

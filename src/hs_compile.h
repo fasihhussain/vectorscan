@@ -1004,6 +1004,17 @@ hs_error_t HS_CDECL hs_populate_platform(hs_platform_info_t *platform);
  */
 #define HS_FLAG_QUIET           1024
 
+/**
+ * Compile flag: Treat the expression as a native grammar-file reference.
+ *
+ * When this flag is set on an expression passed to @ref hs_compile_multi(), the expression string is
+ * interpreted as the path to a Vectorscan native grammar file (`.hsg`) rather than as a regular
+ * expression. Before compilation, the file's `import` directives are resolved (whole-file or a single
+ * named entity), recursively and cycle-safely, and the resulting pattern set is compiled as usual.
+ * This lets one grammar file import patterns from another, natively, with no external format involved.
+ */
+#define HS_FLAG_GRAMMAR_REF     2048
+
 /** @} */
 
 /**
