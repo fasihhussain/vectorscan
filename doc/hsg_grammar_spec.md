@@ -96,6 +96,7 @@ Any other character in the flags field makes the line invalid (a syntax error).
   (import-target level, not pattern level).
 - A pattern belongs to the most recent `entity <name>:` header above it; patterns before any header
   belong to the file's default (unnamed) entity.
+- Entity composition/combination is intentionally **not** part of Phase 1.
 
 ## 5. Well-formedness rules (what makes a line an error)
 
@@ -153,3 +154,41 @@ hs_compile_multi(expressions, flags, ids, 1, HS_MODE_BLOCK, NULL, &db, &compile_
 If `HS_FLAG_GRAMMAR_REF` is set, the expression must be a `.hsg` file path; a non-`.hsg` expression is
 rejected with a clean compile error. XML is **not** accepted by the library — a grammar that exists in
 XML must first be converted to `.hsg` by external tooling, outside the library.
+
+## 9. Future extension points
+
+`.hsg` is a Vectorscan-owned native file format, so future syntax can be added deliberately by updating
+this specification and the parser. Phase 1 intentionally implements only import resolution, entity
+selection, and pattern collection.
+
+Features such as Eduction-style **scoring/confidence** could be added as **metadata**. For example, a
+future per-pattern attribute block might look like:
+
+```hsg
+100:/John/i { score=90 }
+101:/Jon/i  { score=60 }
+```
+
+A possible future grammar extension for that would be:
+
+```ebnf
+pattern     = id , ":" , "/" , regex , "/" , flags , [ ws1 , attr_block ] ;
+attr_block  = "{" , ws , attr , { ws , "," , ws , attr } , ws , "}" ;
+attr        = attr_key , "=" , attr_value ;
+attr_key    = identifier ;
+attr_value  = number | quoted_string | identifier ;
+```
+
+In that design, `score` would be metadata attached to a pattern id or entity. It could be used by a
+future post-processing / chaining layer to rank matches, reduce false positives, or attach confidence
+to extracted entities.
+
+**Important — how this actually works:** the Phase-1 import resolver and the Vectorscan regex compiler
+do **not** interpret `score`. Vectorscan compiles regex patterns and reports matches by id; any score
+metadata would be **looked up after a match is reported**, by a separate layer built on top. So the
+*syntax* for such metadata is an easy addition, but the *behaviour* (scoring, false-positive handling)
+is new logic outside the core matcher, not something Vectorscan provides.
+
+Other future extensions (e.g. `rule`, `chain`, entity-level metadata, additional pattern attributes)
+should be added as explicit syntax in this specification and implemented in separate PRs. Existing
+Phase-1 syntax should remain backward-compatible.
