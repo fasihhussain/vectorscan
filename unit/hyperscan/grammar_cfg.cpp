@@ -15,6 +15,7 @@
 #include "grammar/cfg_compose.h" // internal (not installed): sidecar attach entry points
 
 #include <atomic>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -140,6 +141,26 @@ TEST_F(GrammarCFGCompose, SpecEngcn) {
     Sink s; ASSERT_EQ(HS_SUCCESS, hs_scan(db, "Ai Bai", 6, 0, scr, onMatch, &s));
     bool anyComposite = false; for (auto &e : s.m) if (e.first >= 100000) anyComposite = true;
     EXPECT_TRUE(anyComposite); // spec-template composite (ids 100000+) over engcn components
+    hs_free_scratch(scr); hs_free_database(db);
+}
+// Optional external-data stress test over the real broad_list_composition.spec. Gated by the
+// CFG_FULL_SPEC_PATH env var (this bundled gtest predates GTEST_SKIP, so an unset var early-returns
+// with a printed marker instead). The self-contained SpecEngcn test above always runs and is the
+// CI/mentor-machine proof of the .spec parser; this one is opt-in for the 228k-component full file.
+TEST_F(GrammarCFGCompose, FullSpecFromEnv) {
+    const char *p = std::getenv("CFG_FULL_SPEC_PATH");
+    if (!p || !*p) { std::cerr << "[ SKIPPED ] CFG_FULL_SPEC_PATH unset (no GTEST_SKIP in bundled gtest)\n"; return; }
+    ASSERT_TRUE(std::filesystem::exists(p)) << "CFG_FULL_SPEC_PATH does not exist: " << p;
+    size_t P = 0, T = 0, total = 0;
+    { std::ifstream f(p); std::string line;
+      while (std::getline(f, line)) { total++; if (!line.empty()) { if (line[0] == 'P') P++; else if (line[0] == 'T') T++; } } }
+    std::cerr << "[ INFO ] full spec P=" << P << " T=" << T << " total=" << total << "\n";
+    EXPECT_EQ(228759u, P); EXPECT_EQ(62u, T); EXPECT_EQ(228821u, total); // specific to broad_list_composition.spec
+    hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose(std::string(p), &db)); // full compile, public path
+    hs_scratch_t *scr = nullptr; ASSERT_EQ(HS_SUCCESS, hs_alloc_scratch(db, &scr));
+    Sink s; ASSERT_EQ(HS_SUCCESS, hs_scan(db, "Ai Bai", 6, 0, scr, onMatch, &s));
+    bool comp = false; for (auto &e : s.m) if (e.first >= 100000) comp = true;
+    EXPECT_TRUE(comp); // engcn sample emits a spec-template composite
     hs_free_scratch(scr); hs_free_database(db);
 }
 TEST_F(GrammarCFGCompose, RejectDuplicateId) {
