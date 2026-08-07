@@ -500,6 +500,8 @@ SET (hs_compile_SRCS
     src/grammar/import_resolver.h
     src/grammar/grammar_import.cpp
     src/grammar/grammar_import.h
+    src/grammar/cfg_compose.cpp
+    src/grammar/cfg_compose.h
     src/fdr/engine_description.cpp
     src/fdr/engine_description.h
     src/fdr/fdr_compile.cpp

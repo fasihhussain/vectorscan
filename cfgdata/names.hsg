@@ -1,0 +1,10 @@
+# compose .hsg front-door for name_grammars (component dicts relative to this file's dir)
+dict firstname firstname.txt
+dict lastname lastname.txt
+dict suffix suffix.txt
+compose 9000 namefirstlast: firstname, lastname
+compose 9001 namelastcommafirst: lastname, ",", firstname
+compose 9002 nameinitial: firstname, initials, lastname
+compose 9003 namefirstmiddlelast: firstname, firstname, lastname
+compose 9004 namelastsuffix: firstname, lastname, suffix
+compose 9005 compoundlastname: lastname, "-", lastname

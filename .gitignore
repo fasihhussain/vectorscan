@@ -101,3 +101,4 @@ pcre/stamp-h1
 pcre/test-driver
 
 /build/
+/build-shared/
