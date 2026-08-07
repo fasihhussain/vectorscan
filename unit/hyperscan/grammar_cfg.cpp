@@ -14,10 +14,12 @@
 #include "hs.h"
 #include "grammar/cfg_compose.h" // internal (not installed): sidecar attach entry points
 
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <random>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -98,6 +100,13 @@ protected:
             "dict firstname pt_first.txt\n"
             "dict lastname pt_last.txt\n"
             "compose 9000 namefirstlast: firstname, lastname\n");
+        // Self-contained .spec fixture (P = component literal by type; T = template of conn:type).
+        // Locale-filterable (types carry the "engcn" suffix); exercises the broad_list_name front door
+        // without depending on the 228k-line external spec.
+        writeFile("mini.spec",
+            "P\tff_engcn\tAi\n" "P\tff_engcn\tBo\n"
+            "P\tln_engcn\tBai\n" "P\tln_engcn\tXi\n"
+            "T\t-:ff_engcn\tspace:ln_engcn\n");
     }
     void TearDown() override { std::error_code ec; std::filesystem::remove_all(g_dir, ec); }
 };
@@ -125,17 +134,12 @@ TEST_F(GrammarCFGCompose, ValidAllSixNameGrammars) {
     hs_free_database(db);
 }
 TEST_F(GrammarCFGCompose, SpecEngcn) {
-    const std::string spec = "/Users/fahad/Downloads/Testing/generated/broad_list_name_benchmark/"
-                             "composition/broad_list_composition.spec:engcn";
-    if (!std::filesystem::exists("/Users/fahad/Downloads/Testing/generated/broad_list_name_benchmark/"
-                                 "composition/broad_list_composition.spec")) {
-        std::cerr << "[ SKIPPED ] spec fixture not present\n"; return; // bundled gtest lacks GTEST_SKIP
-    }
-    hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose(spec, &db));
+    // broad_list_name front door: a ".spec" grammar-ref, optionally locale-filtered ("path.spec:locale").
+    hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("mini.spec:engcn", &db));
     hs_scratch_t *scr = nullptr; ASSERT_EQ(HS_SUCCESS, hs_alloc_scratch(db, &scr));
     Sink s; ASSERT_EQ(HS_SUCCESS, hs_scan(db, "Ai Bai", 6, 0, scr, onMatch, &s));
     bool anyComposite = false; for (auto &e : s.m) if (e.first >= 100000) anyComposite = true;
-    EXPECT_TRUE(anyComposite);
+    EXPECT_TRUE(anyComposite); // spec-template composite (ids 100000+) over engcn components
     hs_free_scratch(scr); hs_free_database(db);
 }
 TEST_F(GrammarCFGCompose, RejectDuplicateId) {
@@ -215,6 +219,110 @@ TEST_F(GrammarCFGCompose, ValidPortugueseNames) {
     for (auto &e : s.m) if (e.first == 9000) ok = true; // composite present (byte-span exact = [0, len])
     EXPECT_TRUE(ok);
     hs_free_scratch(scr); hs_free_database(db);
+}
+// ---- Audit 1: streaming/vector fail-closed (CFG is block-mode only for Phase 1) ----
+TEST_F(GrammarCFGCompose, StreamingAndVectorModeFailClosed) {
+    hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("names.hsg", &db)); // block-mode CFG DB
+    hs_stream_t *stream = nullptr;
+    EXPECT_EQ(HS_DB_MODE_ERROR, hs_open_stream(db, 0, &stream)); // cannot open a stream on a block DB
+    hs_scratch_t *scr = nullptr; ASSERT_EQ(HS_SUCCESS, hs_alloc_scratch(db, &scr));
+    const char *d0 = "John Smith"; unsigned l0 = 10; Sink s;
+    EXPECT_EQ(HS_DB_MODE_ERROR, hs_scan_vector(db, &d0, &l0, 1, 0, scr, onMatch, &s));
+    EXPECT_TRUE(s.m.empty()); // no scan happened -> no component-id leak, no composites
+    hs_free_scratch(scr); hs_free_database(db);
+}
+TEST_F(GrammarCFGCompose, ComposeRequiresBlockMode) {
+    const std::string path = g_dir + "/names.hsg"; const char *expr[] = { path.c_str() };
+    unsigned flags[] = { HS_FLAG_GRAMMAR_REF }, ids[] = { 0 };
+    hs_database_t *db = nullptr; hs_compile_error_t *err = nullptr;
+    hs_error_t rc = hs_compile_multi(expr, flags, ids, 1, HS_MODE_STREAM, nullptr, &db, &err);
+    if (err) hs_free_compile_error(err);
+    EXPECT_EQ(HS_COMPILER_ERROR, rc); EXPECT_EQ(nullptr, db); // compose grammar rejects non-BLOCK mode
+}
+// ---- Audit 2: corrupt/mismatched sidecar must fail closed, never silent-drop or crash ----
+static void writeDbAndSidecar(hs_database_t *db, const std::string &dbPath) {
+    char *bytes = nullptr; size_t blen = 0; ASSERT_EQ(HS_SUCCESS, hs_serialize_database(db, &bytes, &blen));
+    { std::ofstream o(dbPath, std::ios::binary); o.write(bytes, (std::streamsize)blen); } free(bytes);
+}
+static hs_database_t *deserFile(const std::string &dbPath) {
+    std::ifstream df(dbPath, std::ios::binary);
+    std::string buf((std::istreambuf_iterator<char>(df)), std::istreambuf_iterator<char>());
+    hs_database_t *db = nullptr; EXPECT_EQ(HS_SUCCESS, hs_deserialize_database(buf.data(), buf.size(), &db));
+    return db;
+}
+TEST_F(GrammarCFGCompose, SidecarWrongMagicFailsClosed) {
+    hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("names.hsg", &db));
+    const std::string dbPath = g_dir + "/wm.hsdb"; std::string err;
+    writeDbAndSidecar(db, dbPath); hs_free_database(db);
+    { std::ofstream o(dbPath + ".cfgmeta"); o << "NOTASIDECAR 9\nrandom junk\n"; }
+    hs_database_t *db2 = deserFile(dbPath);
+    EXPECT_NE(HS_SUCCESS, ue2::grammar::cfgAttachSidecarBeside(db2, dbPath, err)); // rejected
+    hs_scratch_t *scr = nullptr; ASSERT_EQ(HS_SUCCESS, hs_alloc_scratch(db2, &scr));
+    Sink s; EXPECT_EQ(HS_INVALID, hs_scan(db2, "John Smith", 10, 0, scr, onMatch, &s)); // fail closed
+    hs_free_scratch(scr); hs_free_database(db2);
+}
+TEST_F(GrammarCFGCompose, SidecarTruncatedFailsClosed) {
+    hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("names.hsg", &db));
+    const std::string dbPath = g_dir + "/tr.hsdb"; std::string err;
+    writeDbAndSidecar(db, dbPath);
+    ASSERT_TRUE(ue2::grammar::cfgWriteSidecarBeside(db, dbPath, err)) << err; hs_free_database(db);
+    { std::ifstream in(dbPath + ".cfgmeta"); std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+      std::ofstream o(dbPath + ".cfgmeta", std::ios::trunc); o << all.substr(0, 25); } // chop mid-file
+    hs_database_t *db2 = deserFile(dbPath);
+    EXPECT_NE(HS_SUCCESS, ue2::grammar::cfgAttachSidecarBeside(db2, dbPath, err)); // strict parse rejects
+    hs_free_database(db2);
+}
+TEST_F(GrammarCFGCompose, SidecarWrongDbRejected) {
+    hs_database_t *dbA = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("names.hsg", &dbA));
+    const std::string aPath = g_dir + "/A.hsdb"; std::string err;
+    writeDbAndSidecar(dbA, aPath);
+    ASSERT_TRUE(ue2::grammar::cfgWriteSidecarBeside(dbA, aPath, err)) << err; hs_free_database(dbA);
+    hs_database_t *dbB = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("names_pt.hsg", &dbB)); // different DB
+    EXPECT_NE(HS_SUCCESS, ue2::grammar::cfgAttachSidecar(dbB, aPath + ".cfgmeta", err)); // crc mismatch
+    hs_free_database(dbB);
+}
+// ---- Audit 3: side-table lifecycle / no leak ----
+TEST_F(GrammarCFGCompose, SideTableNoLeak) {
+    const size_t base = ue2::grammar::cfgRegistrySize();
+    for (int i = 0; i < 200; i++) {
+        hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("names.hsg", &db));
+        hs_scratch_t *scr = nullptr; ASSERT_EQ(HS_SUCCESS, hs_alloc_scratch(db, &scr));
+        Sink s; hs_scan(db, "John Smith", 10, 0, scr, onMatch, &s);
+        hs_free_scratch(scr); hs_free_database(db);
+    }
+    EXPECT_EQ(base, ue2::grammar::cfgRegistrySize()); // compile/scan/free loop must not grow the table
+    // deserialize/attach/free loop
+    hs_database_t *db0 = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("names.hsg", &db0));
+    const std::string dbPath = g_dir + "/leak.hsdb"; std::string err;
+    writeDbAndSidecar(db0, dbPath);
+    ASSERT_TRUE(ue2::grammar::cfgWriteSidecarBeside(db0, dbPath, err)) << err; hs_free_database(db0);
+    const size_t base2 = ue2::grammar::cfgRegistrySize();
+    for (int i = 0; i < 200; i++) {
+        hs_database_t *db = deserFile(dbPath);
+        ASSERT_EQ(HS_SUCCESS, ue2::grammar::cfgAttachSidecarBeside(db, dbPath, err)) << err;
+        hs_scratch_t *scr = nullptr; ASSERT_EQ(HS_SUCCESS, hs_alloc_scratch(db, &scr));
+        Sink s; hs_scan(db, "John Smith", 10, 0, scr, onMatch, &s);
+        hs_free_scratch(scr); hs_free_database(db);
+    }
+    EXPECT_EQ(base2, ue2::grammar::cfgRegistrySize()); // attach/free loop must not grow the table
+}
+// ---- Audit 4: concurrent scan of one CFG DB, per-thread scratch ----
+TEST_F(GrammarCFGCompose, ConcurrentScanSameDb) {
+    hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("names.hsg", &db));
+    const int N = 8, ITERS = 50; std::atomic<int> ok{0};
+    std::vector<std::thread> th;
+    for (int i = 0; i < N; i++) th.emplace_back([&]() {
+        hs_scratch_t *scr = nullptr; if (hs_alloc_scratch(db, &scr) != HS_SUCCESS) return; // own scratch per thread
+        for (int j = 0; j < ITERS; j++) {
+            Sink s;
+            if (hs_scan(db, "John Smith", 10, 0, scr, onMatch, &s) != HS_SUCCESS) continue;
+            for (auto &e : s.m) if (e.first == 9000 && e.second.first == 0 && e.second.second == 10) { ok++; break; }
+        }
+        hs_free_scratch(scr);
+    });
+    for (auto &t : th) t.join();
+    EXPECT_EQ(N * ITERS, ok.load()); // every scan on every thread found composite 9000, no crash/race
+    hs_free_database(db);
 }
 TEST_F(GrammarCFGCompose, ImportRegressionStillPasses) {
     // The ordinary import path (non-compose .hsg) must still compile + scan unchanged.

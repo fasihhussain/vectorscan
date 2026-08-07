@@ -76,6 +76,9 @@ int  cfgAttachSidecar(struct hs_database *db, const std::string &sidecarPath, st
 bool cfgWriteSidecarBeside(const struct hs_database *db, const std::string &dbPath, std::string &err);
 int  cfgAttachSidecarBeside(struct hs_database *db, const std::string &dbPath, std::string &err);
 
+// Test-only: number of live composition metadata entries in the side-table (leak/lifecycle audits).
+std::size_t cfgRegistrySize();
+
 } // namespace grammar
 } // namespace ue2
 #endif

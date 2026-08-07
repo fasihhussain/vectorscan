@@ -117,6 +117,9 @@ extern "C" void cfg_unregister_impl(const void *db) {
     g_cfgReg.erase(static_cast<const hs_database_t*>(db));
 }
 
+// Test-only: current number of live composition metadata entries (leak/lifecycle audits).
+size_t cfgRegistrySize(){ std::lock_guard<std::mutex> lk(g_cfgMtx); return g_cfgReg.size(); }
+
 Cfg *cfgCreate(){ return new Cfg(); }
 int cfgTemplateCount(const Cfg *c){ return (int)c->templates.size(); }
 void cfgDestroy(Cfg *c){ delete c; }
@@ -341,37 +344,54 @@ int compileComposeGrammar(const char *expr, unsigned mode, hs_database **db, std
 }
 
 // ---- Phase 6: sidecar keyed by a real hs_database (works with the public serialize + hs_scan) ----
-static void writeMeta(std::ostream &sc, const CfgMeta &m){
-    sc<<"CFGSIDECAR 1\n";
+// Format v2: magic + DBCRC (identity, = db->crc32) + TYPES/ID2TYPE/TEMPLATES. readMeta is STRICT:
+// any short read / count mismatch / out-of-range value fails, so a corrupt sidecar can never produce
+// an empty-but-"valid" metadata (which would silently drop composites) — the caller sees the error
+// and a CFG DB scanned without valid metadata fails closed with HS_INVALID.
+static void writeMeta(std::ostream &sc, const CfgMeta &m, uint32_t dbcrc){
+    sc<<"CFGSIDECAR 2\n";
+    sc<<"DBCRC "<<dbcrc<<"\n";
     sc<<"TYPES "<<m.typeName.size()<<"\n"; for(auto&t:m.typeName) sc<<t<<"\n";
     sc<<"ID2TYPE "<<m.id2type.size()<<"\n"; for(size_t i=0;i<m.id2type.size();i++) sc<<m.id2type[i]<<" "<<m.litLen[i]<<"\n";
     sc<<"TEMPLATES "<<m.templates.size()<<"\n";
     for(auto&t:m.templates){ sc<<t.id<<" "<<t.name<<" "<<t.steps.size()<<"\n";
         for(auto&s:t.steps) sc<<s.conn<<"\t"<<s.entity<<"\t"<<s.lit<<"\n"; }
 }
-static bool readMeta(std::istream &sc, CfgMeta &m, std::string &err){
-    std::string tok; int ver=0; sc>>tok>>ver; if(tok!="CFGSIDECAR"){ err="sidecar: bad magic"; return false; }
-    sc>>tok; size_t nt=0; sc>>nt; { std::string junk; std::getline(sc,junk); }
-    for(size_t i=0;i<nt;i++){ std::string t; std::getline(sc,t); m.typeName.push_back(t); m.typeIdx[t]=(int)i; }
-    sc>>tok; size_t nid=0; sc>>nid; for(size_t i=0;i<nid;i++){ int ty; uint32_t ll; sc>>ty>>ll; m.id2type.push_back(ty); m.litLen.push_back(ll); }
-    sc>>tok; size_t ntpl=0; sc>>ntpl; { std::string junk; std::getline(sc,junk); }
-    for(size_t i=0;i<ntpl;i++){ Template t; std::string hdr; std::getline(sc,hdr); std::istringstream hs(hdr);
-        size_t nsteps=0; hs>>t.id>>t.name>>nsteps;
-        for(size_t k=0;k<nsteps;k++){ std::string sl; std::getline(sc,sl); std::istringstream ls(sl);
-            Step st; std::string connS,ent,lit; std::getline(ls,connS,'\t'); std::getline(ls,ent,'\t'); std::getline(ls,lit,'\t');
+static bool readMeta(std::istream &sc, CfgMeta &m, uint32_t &dbcrc, std::string &err){
+    std::string tok; int ver=0;
+    if(!(sc>>tok>>ver) || tok!="CFGSIDECAR" || ver!=2){ err="sidecar: bad magic/version"; return false; }
+    if(!(sc>>tok>>dbcrc) || tok!="DBCRC"){ err="sidecar: missing DBCRC"; return false; }
+    size_t nt=0; if(!(sc>>tok>>nt) || tok!="TYPES"){ err="sidecar: bad TYPES header"; return false; }
+    { std::string junk; std::getline(sc,junk); }
+    for(size_t i=0;i<nt;i++){ std::string t; if(!std::getline(sc,t)){ err="sidecar: truncated TYPES"; return false; }
+        m.typeName.push_back(t); m.typeIdx[t]=(int)i; }
+    size_t nid=0; if(!(sc>>tok>>nid) || tok!="ID2TYPE"){ err="sidecar: bad ID2TYPE header"; return false; }
+    for(size_t i=0;i<nid;i++){ int ty=0; long long ll=-1; if(!(sc>>ty>>ll)){ err="sidecar: truncated ID2TYPE"; return false; }
+        if(ty<0 || ty>=(int)nt || ll<0){ err="sidecar: id2type/litLen out of range"; return false; }
+        m.id2type.push_back(ty); m.litLen.push_back((uint32_t)ll); }
+    size_t ntpl=0; if(!(sc>>tok>>ntpl) || tok!="TEMPLATES"){ err="sidecar: bad TEMPLATES header"; return false; }
+    { std::string junk; std::getline(sc,junk); }
+    for(size_t i=0;i<ntpl;i++){ std::string hdr; if(!std::getline(sc,hdr)){ err="sidecar: truncated TEMPLATES"; return false; }
+        std::istringstream hh(hdr); Template t; size_t nsteps=0;
+        if(!(hh>>t.id>>t.name>>nsteps) || nsteps<1){ err="sidecar: bad template header"; return false; }
+        for(size_t k=0;k<nsteps;k++){ std::string sl; if(!std::getline(sc,sl)){ err="sidecar: truncated template steps"; return false; }
+            std::istringstream ls(sl); Step st; std::string connS,ent,lit;
+            std::getline(ls,connS,'\t'); std::getline(ls,ent,'\t'); std::getline(ls,lit,'\t');
             st.conn=std::atoi(connS.c_str()); st.entity=ent; st.lit=lit; t.steps.push_back(st); }
         m.templates.push_back(std::move(t)); }
+    if(m.id2type.size()!=nid || m.litLen.size()!=nid || m.templates.size()!=ntpl){ err="sidecar: count mismatch"; return false; }
     return true;
 }
 bool cfgSerializeSidecar(const hs_database *db, const std::string &sidecarPath, std::string &err){
     CfgMeta m; if(!cfgLookupMeta(db,m)){ err="serialize sidecar: db has no composition metadata"; return false; }
     std::ofstream sc(sidecarPath); if(!sc){ err="serialize sidecar: cannot open "+sidecarPath; return false; }
-    writeMeta(sc,m); return true;
+    writeMeta(sc,m,((const hs_database_t*)db)->crc32); return true;
 }
 int cfgAttachSidecar(hs_database *db, const std::string &sidecarPath, std::string &err){
     if(!db){ err="attach: null db"; return HS_INVALID; }
     std::ifstream sc(sidecarPath); if(!sc){ err="attach: cannot open sidecar "+sidecarPath; return HS_INVALID; }
-    CfgMeta m; if(!readMeta(sc,m,err)) return HS_INVALID;
+    CfgMeta m; uint32_t dbcrc=0; if(!readMeta(sc,m,dbcrc,err)) return HS_INVALID;
+    if(dbcrc != ((hs_database_t*)db)->crc32){ err="attach: sidecar does not match this DB (crc mismatch)"; return HS_INVALID; }
     ((hs_database_t*)db)->reserved0 |= HS_DB_CFG_FLAG; // ensure gate bit (normally already set from serialized header)
     cfgRegisterMeta(db,std::move(m));
     return HS_SUCCESS;
