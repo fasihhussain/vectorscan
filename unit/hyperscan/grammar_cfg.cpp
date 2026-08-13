@@ -171,9 +171,13 @@ TEST_F(GrammarCFGCompose, RejectSelfRef) {
     hs_database_t *db = nullptr; EXPECT_EQ(HS_COMPILER_ERROR, compileCompose("selfref.hsg", &db));
     EXPECT_EQ(nullptr, db);
 }
-TEST_F(GrammarCFGCompose, RejectNestedCompose) {
-    hs_database_t *db = nullptr; EXPECT_EQ(HS_COMPILER_ERROR, compileCompose("nested.hsg", &db));
-    EXPECT_EQ(nullptr, db);
+TEST_F(GrammarCFGCompose, ChainNestedCompose) {
+    // CHAINING: nested compose (a composite referencing another composite) is now SUPPORTED.
+    // nested.hsg: 9000 base = firstname lastname ; 9001 nested = base lastname  (depth-2)
+    hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("nested.hsg", &db));
+    EXPECT_TRUE(hasComposite(db, "John Smith Jones", 9000, 0, 10));   // base (depth-1)
+    EXPECT_TRUE(hasComposite(db, "John Smith Jones", 9001, 0, 16));   // nested uses base (depth-2)
+    hs_free_database(db);
 }
 TEST_F(GrammarCFGCompose, RejectMissingEntity) {
     hs_database_t *db = nullptr; EXPECT_EQ(HS_COMPILER_ERROR, compileCompose("missing.hsg", &db));

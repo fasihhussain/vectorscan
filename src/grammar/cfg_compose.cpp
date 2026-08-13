@@ -157,9 +157,12 @@ bool cfgAddComposeLine(Cfg *c, const std::string &line, std::string &err){
     }
     if(t.steps.size()<2){ err="compose "+name+": needs >=2 components"; return false; }
     for(auto &st:t.steps){
-        if(st.entity==name){ err="compose "+name+": self-reference"; return false; }
-        if(c->composeNames.count(st.entity)){ err="compose "+name+": references composite '"+st.entity+"' (depth>1 not allowed)"; return false; }
-        if(!c->ents.count(st.entity)){ err="compose "+name+": references missing/empty entity '"+st.entity+"'"; return false; }
+        if(st.entity==name){ err="compose "+name+": self-reference (cycle)"; return false; }
+        bool isFlat=c->ents.count(st.entity)!=0, isComposite=c->composeNames.count(st.entity)!=0;
+        if(!isFlat && !isComposite){ err="compose "+name+": references missing/empty entity '"+st.entity+"'"; return false; }
+        // Composite refs are ALLOWED (chaining, depth>1). Indirect cycles are structurally impossible:
+        // a step may only reference an ALREADY-DEFINED composite, so the template list is a DAG in
+        // definition = topological order. Direct self-reference is rejected above.
     }
     c->ids.insert(id); c->names.insert(name); c->composeNames.insert(name); c->templates.push_back(std::move(t));
     return true;
@@ -186,12 +189,21 @@ bool cfgLoadSpec(Cfg *c, const std::string &path, const std::string &loc, std::s
     if(nt==0){ err="spec: no templates parsed (locale '"+loc+"')"; return false; } return true;
 }
 bool cfgCompile(Cfg *c, std::string &err){
+    std::set<std::string> compositeNames; for(auto &t:c->templates) compositeNames.insert(t.name);
     std::set<std::string> used; for(auto &t:c->templates) for(auto &s:t.steps) used.insert(s.entity);
+    for(auto &t:c->templates) used.insert(t.name);   // composite OUTPUTS are types too (they hold composite spans at scan time)
     std::vector<const char*> ex; std::vector<unsigned> fl,id; std::vector<size_t> lens;
-    for(auto &en:used){ if(!c->ents.count(en)){ err="component missing at compile: "+en; return false; }
+    for(auto &en:used){
+        if(c->typeIdx.count(en)) continue;
         int ti=(int)c->typeName.size(); c->typeIdx[en]=ti; c->typeName.push_back(en);
-        for(auto &w:c->ents[en]){ ex.push_back(w.c_str()); fl.push_back(0/*no SOM*/); id.push_back((unsigned)c->id2type.size());
-            lens.push_back(w.size()); c->id2type.push_back(ti); c->litLen.push_back((uint32_t)w.size()); } }
+        if(c->ents.count(en)){                        // flat entity -> compile its literals into the component DB
+            for(auto &w:c->ents[en]){ ex.push_back(w.c_str()); fl.push_back(0/*no SOM*/); id.push_back((unsigned)c->id2type.size());
+                lens.push_back(w.size()); c->id2type.push_back(ti); c->litLen.push_back((uint32_t)w.size()); }
+        } else if(!compositeNames.count(en)){         // neither a flat dict nor a composite output -> genuine error
+            err="component missing at compile: "+en; return false;
+        }
+        // else: composite output type -> type index only, no literals (spans are produced at scan time by chaining)
+    }
     hs_compile_error_t *e=nullptr;
     if(hs_compile_lit_multi(ex.data(),fl.data(),id.data(),lens.data(),(unsigned)ex.size(),
                             HS_MODE_BLOCK,nullptr,&c->db,&e)!=HS_SUCCESS){ err=e&&e->message?e->message:"compile fail"; if(e)hs_free_compile_error(e); return false; }
@@ -273,10 +285,17 @@ extern "C" hs_error_t cfg_scan_dispatch(const hs_database_t *db, const char *dat
                 auto lo=std::lower_bound(bs.begin(),bs.end(),pos,[](const FT&f,uint32_t p){return f.from<p;});
                 for(auto it=lo; it!=bs.end()&&it->from<=amax; ++it) if(connOk(conn,s,pos,it->from,lit)) nx.insert(pack(start,it->to)); }
             part.swap(nx); }
+        // Chaining: feed this template's composite spans back into the span map so later templates
+        // (which appear after it in definition = topological order) can consume them as components.
+        // Flat/1-layer grammars have nothing referencing these outputs, so their behavior is unchanged.
+        auto oit=meta.typeIdx.find(t.name); int outIdx=(oit!=meta.typeIdx.end())?oit->second:-1;
+        std::vector<FT> *bucket=(outIdx>=0 && outIdx<(int)byType.size())?&byType[outIdx]:nullptr;
         for(uint64_t v:part){ uint32_t st=(uint32_t)(v>>32),en=(uint32_t)v;
+            if(bucket) bucket->push_back({st,en});          // available to downstream composites
             if(st>0&&isWord((unsigned char)s[st-1])&&isWord((unsigned char)s[st])) continue;
             if(en<len&&isWord((unsigned char)s[en-1])&&isWord((unsigned char)s[en])) continue;
-            out.push_back({t.id,st,en}); } }
+            out.push_back({t.id,st,en}); }
+        if(bucket) std::sort(bucket->begin(),bucket->end(),[](const FT&a,const FT&b){return a.from<b.from;}); }
     std::sort(out.begin(),out.end(),[](const CfgDet&a,const CfgDet&b){return a.from<b.from||(a.from==b.from&&a.to>b.to);});
     for(auto &d:out){ int r=onEvent?onEvent(d.id,(unsigned long long)d.from,(unsigned long long)d.to,0,userCtx):0;
         if(r!=0) return HS_SCAN_TERMINATED; } // composite callback early-return honored
