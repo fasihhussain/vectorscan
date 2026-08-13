@@ -53,6 +53,7 @@
 #include "util/popcount.h"
 #include "util/target_info.h"
 #include "grammar/grammar_import.h"
+#include "grammar/cfg_compose.h"
 
 #include <cassert>
 #include <cstddef>
@@ -442,6 +443,22 @@ hs_error_t HS_CDECL hs_compile_multi(const char *const *expressions,
             if (flags[i] & HS_FLAG_GRAMMAR_REF) {
                 anyGrammar = true;
             }
+        }
+        // CFG composition front-door: a single HS_FLAG_GRAMMAR_REF expression naming a composition
+        // grammar (.spec, optionally "path.spec:locale", or a .hsg with a `compose` directive) is
+        // compiled by the composition engine into a component DB with composition metadata attached
+        // and the CFG gate bit set. Composites then surface through the ordinary hs_scan callback.
+        if (anyGrammar && !anyNullExpr && elements == 1 &&
+            (flags[0] & HS_FLAG_GRAMMAR_REF) && grammar::isComposeGrammar(expressions[0])) {
+            string cerr;
+            hs_error_t rv = (hs_error_t)grammar::compileComposeGrammar(expressions[0], mode, db, cerr);
+            if (rv != HS_SUCCESS) {
+                *db = nullptr;
+                *error = generateCompileError(
+                    cerr.empty() ? "compose grammar compile failed" : cerr, -1);
+                return HS_COMPILER_ERROR;
+            }
+            return HS_SUCCESS;
         }
         if (anyGrammar && !anyNullExpr) {
             vector<string> exprStore;

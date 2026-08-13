@@ -45,6 +45,7 @@ set(unit_hyperscan_SOURCES
     hyperscan/expr_info.cpp
     hyperscan/extparam.cpp
     hyperscan/grammar_import.cpp
+    hyperscan/grammar_cfg.cpp
     hyperscan/identical.cpp
     hyperscan/literals.cpp
     hyperscan/logical_combination.cpp

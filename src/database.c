@@ -42,6 +42,7 @@
 #include "crc32.h"
 #include "rose/rose_internal.h"
 #include "util/unaligned.h"
+#include "grammar/cfg_runtime.h"
 
 static really_inline
 int db_correctly_aligned(const void *db) {
@@ -52,6 +53,11 @@ HS_PUBLIC_API
 hs_error_t HS_CDECL hs_free_database(hs_database_t *db) {
     if (db && db->magic != HS_DB_MAGIC) {
         return HS_INVALID;
+    }
+    /* Drop any CFG composition side-table entry keyed by this DB. No-op (hook NULL) unless a
+     * CFG database was compiled in this process. Safe for non-CFG DBs (not in the table). */
+    if (db && cfg_unregister_hook) {
+        cfg_unregister_hook(db);
     }
     hs_database_free(db);
 

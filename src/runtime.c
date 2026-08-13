@@ -57,6 +57,12 @@
 #include "ue2common.h"
 #include "util/exhaust.h"
 #include "util/multibit.h"
+#include "grammar/cfg_runtime.h"
+
+/* CFG composition hooks (weak coupling to the hs_compile side). NULL until a CFG database
+ * is compiled and registered; non-CFG builds/paths never dereference them. See cfg_runtime.h. */
+cfg_dispatch_fn cfg_dispatch_hook = NULL;
+cfg_unregister_fn cfg_unregister_hook = NULL;
 
 static really_inline
 void prefetch_data(const char *data, unsigned length) {
@@ -312,11 +318,36 @@ void runSmallWriteEngine(const struct SmallWriteEngine *smwr,
     }
 }
 
+/* Public block-mode scan. Fast path (non-CFG databases) is a single reserved0-bit test then the
+ * unchanged original body (hs_scan_i). CFG databases (bit set at compile time) are handed to the
+ * composition dispatcher, which runs hs_scan_i internally to collect components, then position-joins
+ * and emits composites to this same user callback. The bit is 0 for every database ever produced by
+ * stock compile/deserialize, so existing behavior and performance are unchanged. */
 HS_PUBLIC_API
 hs_error_t HS_CDECL hs_scan(const hs_database_t *db, const char *data,
                             unsigned length, unsigned flags,
                             hs_scratch_t *scratch, match_event_handler onEvent,
                             void *userCtx) {
+    if (db && (db->reserved0 & HS_DB_CFG_FLAG)) {
+        /* CFG-flagged DB. The dispatcher must be present (compile side loaded) AND find this DB's
+         * metadata in the side-table; otherwise we must NOT silently scan as a plain component DB
+         * and drop composites. Report HS_INVALID (the dispatcher enforces the metadata-present half;
+         * a NULL hook means the composition engine was never armed in this process). */
+        if (!cfg_dispatch_hook) {
+            return HS_INVALID;
+        }
+        return cfg_dispatch_hook(db, data, length, flags, scratch, onEvent,
+                                 userCtx);
+    }
+    return hs_scan_i(db, data, length, flags, scratch, onEvent, userCtx);
+}
+
+/* Original scan body, unchanged. Renamed so the CFG dispatcher can invoke it without re-entering
+ * the gate above (which would recurse). Not HS_PUBLIC_API; declared only in the internal header. */
+hs_error_t hs_scan_i(const hs_database_t *db, const char *data,
+                     unsigned length, unsigned flags,
+                     hs_scratch_t *scratch, match_event_handler onEvent,
+                     void *userCtx) {
     if (unlikely(!scratch || !data)) {
         return HS_INVALID;
     }
