@@ -110,6 +110,13 @@ protected:
         writeFile("names_opt.hsg",
             "dict firstname firstname.txt\ndict lastname lastname.txt\ndict suffix suffix.txt\n"
             "compose 9000 name_optsuffix: firstname, lastname, suffix?\n");
+        // chaining: depth-3 (broad_list-style) — quad -> triple -> pair -> tok
+        writeFile("tok.txt", "John\nSmith\nMary\nJane\n");
+        writeFile("names_depth3.hsg",
+            "dict tok tok.txt\n"
+            "compose 9000 pair: tok, tok\n"       // depth-1
+            "compose 9001 triple: pair, tok\n"    // depth-2 (uses pair)
+            "compose 9002 quad: triple, tok\n");  // depth-3 (uses triple -> pair)
         // Self-contained .spec fixture (P = component literal by type; T = template of conn:type).
         // Locale-filterable (types carry the "engcn" suffix); exercises the broad_list_name front door
         // without depending on the 228k-line external spec.
@@ -192,6 +199,14 @@ TEST_F(GrammarCFGCompose, OptionalStepSkippedOrPresent) {
     hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("names_opt.hsg", &db));
     EXPECT_TRUE(hasComposite(db, "John Smith",    9000, 0, 10));  // suffix skipped
     EXPECT_TRUE(hasComposite(db, "John Smith Jr", 9000, 0, 13));  // suffix present
+    hs_free_database(db);
+}
+TEST_F(GrammarCFGCompose, ChainDepth3BroadListStyle) {
+    // depth-3 chain (matches broad_list's max depth): quad -> triple -> pair -> tok.
+    hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("names_depth3.hsg", &db));
+    EXPECT_TRUE(hasComposite(db, "John Smith Mary Jane", 9000, 0, 10));  // pair   (depth-1)
+    EXPECT_TRUE(hasComposite(db, "John Smith Mary Jane", 9001, 0, 15));  // triple (depth-2, uses pair)
+    EXPECT_TRUE(hasComposite(db, "John Smith Mary Jane", 9002, 0, 20));  // quad   (depth-3, uses triple->pair)
     hs_free_database(db);
 }
 TEST_F(GrammarCFGCompose, ChainNestedCompose) {
