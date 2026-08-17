@@ -17,6 +17,14 @@ findings, and (conservatively) apply optimizations with before/after evidence.
 - **`.spec`** — same public path (requires the compose/`.spec` support merged from the CFG 1-layer PR;
   present on `develop`). If run on a branch without it, `.spec` reports a structured
   `unsupported/pending_pr3` finding rather than faking support.
+  - **Known limitation — literal-component only.** The exec compiles `.spec` `P`-lines as **literals**
+    (`hs_compile_lit_multi`, no regex). Literal-component specs (broad_list / name style) are fully
+    supported. **Regex-component specs** (e.g. the addr benchmark specs whose `P`-lines are patterns like
+    `P<TAB>street<TAB>(?i:...)`) are matched **literally, not as regexes** — so they are *not* semantically
+    equivalent to the Eduction grammar. When ≥10% of `P`-lines look like regexes the report emits a
+    `regex_component_spec_unsupported` **limitation** finding; do **not** claim parity for such specs. This
+    would need engine support (regex `P`-line compilation) and is out of scope for the tooling — it is
+    documented here rather than faked.
 - **XML — best-effort.** This fork has **no general XML→HSG converter**. If one exists it is used;
   otherwise the report contains a structured **`converter_missing`** finding. XML is **not** faked, and
   benchmark-specific XML flatteners are **not** used as general converters. An unsupported format is a
@@ -52,8 +60,13 @@ self-contained runs inside the fork.
 
 ## Eduction comparison modes
 - **`--eduction-output <csv>`** — compare VS detections to an existing Eduction CSV
-  (`file,entity,text,start_offset,end_offset`). Parity is by span, after the standard normalization
-  (drop pure-space tokens, strip one trailing space).
+  (`file,entity,text,start_offset,end_offset`). Column names are **normalized** (lowercased, trimmed,
+  spaces→underscores), so **both** `start_offset`/`end_offset` **and** `start offset`/`end offset` headers
+  are accepted (real Eduction bench CSVs use the spaced form). If a CSV has rows but **no** recognizable
+  start/end columns, parity is reported **unavailable** with an `eduction_csv_schema_error` reason — it is
+  never a silent `0` detections / spurious `parity=True`. A genuinely empty file is honestly reported as
+  0 rows. Parity is by span, after the standard normalization (drop pure-space tokens, strip one trailing
+  space).
 - **`--eduction-bin <path>`** — best-effort; live Eduction needs jar + environment setup, so it is
   usually reported `unavailable` rather than run.
 - **Neither** — VS still benchmarks; parity is marked `unavailable` (no parity-safety claim).

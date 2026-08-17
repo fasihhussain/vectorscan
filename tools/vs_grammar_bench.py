@@ -114,17 +114,52 @@ def _norm_ed_rows(rows):
     return set(out)
 
 
+class EductionCsvSchemaError(Exception):
+    """Raised when an Eduction CSV has rows but no recognizable start/end columns — so we never
+    silently return 0 detections (which would produce a spurious parity=True)."""
+
+
+def _norm_col(c):
+    return c.strip().lower().replace(" ", "_")
+
+
 def load_eduction_csv(path):
-    rows = []
+    """Parse an Eduction detections CSV. Column names are normalized (lowercase, trimmed, spaces->
+    underscores) so both 'start_offset'/'end_offset' and 'start offset'/'end offset' work.
+    Raises EductionCsvSchemaError if data is present but start/end columns are unrecognizable."""
     with open(path, newline="") as f:
-        r = csv.DictReader(f)
-        for row in r:
-            try:
-                rows.append((row.get("entity", "").split("/")[-1],
-                             int(row["start_offset"]), int(row["end_offset"]), row.get("text", "")))
-            except (KeyError, ValueError):
-                continue
-    return rows
+        rows = list(csv.reader(f))
+    if not rows:
+        return []  # genuinely empty file -> 0 rows (honest)
+    header = [_norm_col(c) for c in rows[0]]
+
+    def find(cands):
+        for i, h in enumerate(header):
+            if h in cands:
+                return i
+        return -1
+
+    si = find({"start_offset", "start_off", "start", "from"})
+    ei = find({"end_offset", "end_off", "end", "to"})
+    ent_i = find({"entity", "type", "name"})
+    txt_i = find({"text", "match", "matched_text"})
+    if si < 0 or ei < 0:
+        raise EductionCsvSchemaError(
+            f"no recognizable start/end columns in header {rows[0]} "
+            f"(normalized {header}); expected start_offset/end_offset or 'start offset'/'end offset'")
+
+    out = []
+    for r in rows[1:]:
+        if len(r) <= max(si, ei):
+            continue
+        try:
+            s, e = int(r[si]), int(r[ei])
+        except ValueError:
+            continue  # non-numeric row (e.g. stray blank) — skip, schema is still valid
+        ent = r[ent_i].split("/")[-1] if 0 <= ent_i < len(r) else ""
+        txt = r[txt_i] if 0 <= txt_i < len(r) else ""
+        out.append((ent, s, e, txt))
+    return out
 
 
 def parity_from_csv(vs_dets, ed_rows):
@@ -145,6 +180,49 @@ def run_eduction_bin(edbin, corpus):
     warn(f"--eduction-bin given ({edbin}) but live Eduction execution is environment-specific "
          "(jar + quarantine setup); not run here. Provide --eduction-output CSV for parity.")
     return {"available": False, "reason": "eduction_bin_not_run"}
+
+
+def compute_parity(args, dets):
+    """Single source of truth for parity (used by main + the apply loop). A CSV schema error is
+    surfaced as parity 'unavailable' with reason — never a silent 0-row parity=True."""
+    if args.eduction_output:
+        if not Path(args.eduction_output).exists():
+            return {"available": False, "reason": "eduction_output_not_found"}
+        try:
+            ed = load_eduction_csv(args.eduction_output)
+        except EductionCsvSchemaError as e:
+            return {"available": False, "reason": "eduction_csv_schema_error", "detail": str(e)}
+        return parity_from_csv(dets, ed)
+    if args.eduction_bin:
+        return run_eduction_bin(args.eduction_bin, args.corpus)
+    return {"available": False, "reason": "no_eduction_data"}
+
+
+def spec_regex_component_finding(path):
+    """The exec compiles .spec P-lines as LITERALS. If a .spec's P-lines look like regexes (e.g. the
+    addr benchmark specs 'P<TAB>street<TAB>(?i:...)'), warn: they will match literally, not as regexes."""
+    try:
+        lines = Path(path).read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+    meta = re.compile(r'\(\?|\\[dwsDWSbB]|\[[^\]]+\]|\{\d|\)[?*+]|[^\\]\|')
+    n_p = n_rx = 0
+    for ln in lines:
+        if ln.startswith("P\t"):
+            n_p += 1
+            parts = ln.split("\t")
+            if len(parts) >= 3 and meta.search(parts[2]):
+                n_rx += 1
+    if n_p and n_rx >= max(1, n_p // 10):
+        return {"severity": "limitation", "kind": "regex_component_spec_unsupported",
+                "where": "spec P-lines",
+                "detail": (f"{n_rx}/{n_p} P-lines look like REGEX components. The tool compiles .spec P-lines "
+                           "as LITERALS (hs_compile_lit_multi), so regex-component specs (e.g. addr benchmark "
+                           "specs) are matched literally and are NOT semantically equivalent. Only "
+                           "literal-component .spec (broad_list/name style) is supported. Do not claim parity "
+                           "for regex-component specs without engine support."),
+                "note": "known limitation, not an engine bug"}
+    return None
 
 
 # ---------------------------------------------------------------- static analysis (perf guide)
@@ -232,7 +310,7 @@ def apply_loop(grammar, fmt, exe, corpus, args, baseline_bench, baseline_parity)
         after = aggregate([run_bench_once(exe, grammar, corpus) for _ in range(max(1, args.repeat))])
         after_par = None
         if baseline_parity and baseline_parity.get("available"):
-            after_par = parity_from_csv(after["detections"], load_eduction_csv(args.eduction_output))
+            after_par = compute_parity(args, after["detections"])
         parity_ok = (after_par is None) or (not _parity_regressed(baseline_parity, after_par))
         matches_ok = after and after["matches"] == baseline_bench["matches"]
         keep = matches_ok and parity_ok
@@ -357,20 +435,18 @@ def main():
     bench = aggregate(runs)
     rep["benchmark"] = bench
 
-    parity = None
-    if args.eduction_output:
-        if Path(args.eduction_output).exists():
-            parity = parity_from_csv(bench["detections"], load_eduction_csv(args.eduction_output))
-        else:
-            parity = {"available": False, "reason": "eduction_output_not_found"}
-    elif args.eduction_bin:
-        parity = run_eduction_bin(args.eduction_bin, args.corpus)
-    else:
-        parity = {"available": False, "reason": "no_eduction_data"}
+    parity = compute_parity(args, bench["detections"])
     rep["parity"] = parity
+    if parity.get("reason") == "eduction_csv_schema_error":
+        warn(f"Eduction CSV schema error: {parity.get('detail')} — parity reported UNAVAILABLE (not a false 0)")
 
     pats, partial, note = extract_patterns(norm_path, fmt)
     findings, note = static_findings(pats, note)
+    if fmt == "spec":
+        rx_finding = spec_regex_component_finding(norm_path)
+        if rx_finding is not None:
+            findings.append(rx_finding)
+            warn(f"spec: {rx_finding['kind']} — {rx_finding['detail']}")
     rep["static_findings"] = findings
     rep["static_partial"] = partial
     if note:
