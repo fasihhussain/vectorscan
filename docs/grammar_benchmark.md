@@ -8,7 +8,8 @@ findings, and (conservatively) apply optimizations with before/after evidence.
 | Path | Role |
 |---|---|
 | `tools/vs_grammar_bench_exec.cpp` → target `vs_grammar_bench` | C++ exec: compile + scan measurement, emits JSON (incl. a `detections` array). No optimization/Claude logic. |
-| `tools/vs_grammar_bench.py` | Orchestrator: build-check, normalize, warmup+repeat, aggregate, Eduction parity, static findings, apply loop, JSON/Markdown report. |
+| `tools/vs_grammar_bench.py` | Orchestrator: build-check, normalize (incl. XML auto-convert), warmup+repeat, aggregate, Eduction parity (with match-semantics normalization), static findings, apply loop, JSON/Markdown report. |
+| `tools/xml_to_hsg.py` | Eduction/IDOL grammar XML → `.hsg` converter (literal dicts, regex, inline-flattened `(?A:name)` composition). Honest about empty/oversized/decompiled-composite limits. |
 | `.claude/skills/vectorscan-grammar-optimizer/SKILL.md` | Claude Skill that drives the workflow with guardrails. |
 | `.claude/skills/vectorscan-grammar-optimizer/scripts/classify.py` | Classifies findings: `auto_apply_eligible` vs `review_required`. |
 
@@ -25,10 +26,21 @@ findings, and (conservatively) apply optimizations with before/after evidence.
     `regex_component_spec_unsupported` **limitation** finding; do **not** claim parity for such specs. This
     would need engine support (regex `P`-line compilation) and is out of scope for the tooling — it is
     documented here rather than faked.
-- **XML — best-effort.** This fork has **no general XML→HSG converter**. If one exists it is used;
-  otherwise the report contains a structured **`converter_missing`** finding. XML is **not** faked, and
-  benchmark-specific XML flatteners are **not** used as general converters. An unsupported format is a
-  clean per-format finding, not a whole-run failure.
+- **XML — auto-converted** via `tools/xml_to_hsg.py` (Eduction/IDOL decompiled grammar XML). The
+  benchmark calls the converter automatically; the report records a `conversion` block listing each
+  emitted entity + tier. Three tiers, all faithful, none faked:
+  - **Tier 1 — literal dicts** (`<pattern>lit</pattern>` / `<entry headword="lit"/>`) → multi-literal
+    `id:/lit/` patterns (census + name leaf dictionaries).
+  - **Tier 2 — single regex** entity → import `id:/regex/`.
+  - **Tier 3 — composition** (`(?A:name)` / `(?A^name)` references) → inline-flattened into one regex
+    (the engine resolves cross-file `import` directives but not intra-pattern refs, so the converter
+    inlines them; the flattened form equals the shipped `bm_addr_flat`).
+  - **Honest limits:** empty entities (decompiled composites with no data) are **skipped** with a
+    reason; a flattened composition that exceeds Hyperscan's pattern-length limit is reported as a
+    compile error (the large `addr_dict_l/m`, `addr_full`, `addr_perm_*` grammars — they need a
+    regex-capable composition engine, out of scope). Name **composite** grammars can't be reproduced
+    from the decompiled XML because the XML carries only the leaf dicts + connector fragments, not the
+    composition — reported, not faked.
 
 ## Build-check
 On startup, if the exec is missing the script runs (using `cmake --build`, not raw `make`):
@@ -65,8 +77,17 @@ self-contained runs inside the fork.
   are accepted (real Eduction bench CSVs use the spaced form). If a CSV has rows but **no** recognizable
   start/end columns, parity is reported **unavailable** with an `eduction_csv_schema_error` reason — it is
   never a silent `0` detections / spurious `parity=True`. A genuinely empty file is honestly reported as
-  0 rows. Parity is by span, after the standard normalization (drop pure-space tokens, strip one trailing
-  space).
+  0 rows.
+  - **Parity normalizations** (each recorded in the report's `parity.normalization`, all off-switchable,
+    none invent matches):
+    - **corpus-file filter** — an Eduction CSV often concatenates detections for several corpus files
+      (e.g. `a3__dense` + `a3__sparse`); only rows whose `file` column matches the scanned corpus are
+      compared, so the other file's rows aren't counted as spurious FNs.
+    - **`leftmost_longest`** (default; `--no-leftmost-longest` to disable) — Hyperscan reports *every*
+      end position for a match; this collapses them to Eduction's non-overlapping leftmost-longest model.
+    - **`char_offsets`** (auto on multibyte corpora; `--no-char-offsets` to disable) — maps VS **byte**
+      offsets to **character** offsets, since Eduction reports character offsets (`Ö` = 1 char / 2 bytes).
+  - Plus the standard span normalization (drop pure-space tokens, strip one trailing space).
 - **`--eduction-bin <path>`** — best-effort; live Eduction needs jar + environment setup, so it is
   usually reported `unavailable` rather than run.
 - **Neither** — VS still benchmarks; parity is marked `unavailable` (no parity-safety claim).

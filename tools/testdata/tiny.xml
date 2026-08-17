@@ -1,6 +1,19 @@
 <?xml version="1.0"?>
+<!-- Self-contained Eduction-style fixture exercising all converter tiers:
+     - first/last: literal dicts (Tier 1)
+     - fullname: composition via (?A:name) references (Tier 3, inline-flattened) -->
 <grammars version="4.0">
   <grammar name="t">
-    <entity name="first" type="public"><entry headword="John"/><entry headword="Jane"/></entity>
+    <entity name="first" type="private" case="sensitive">
+      <entry headword="John"/>
+      <entry headword="Jane"/>
+    </entity>
+    <entity name="last" type="private" case="sensitive">
+      <entry headword="Smith"/>
+      <entry headword="Doe"/>
+    </entity>
+    <entity name="fullname" type="public" case="sensitive">
+      <pattern>(?A:first) (?A:last)</pattern>
+    </entity>
   </grammar>
 </grammars>

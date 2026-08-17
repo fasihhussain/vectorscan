@@ -59,12 +59,32 @@ def normalize_grammar(path, fmt):
     if fmt == "spec":
         return path, None  # .spec is accepted by the exec via HS_FLAG_GRAMMAR_REF on this branch
     if fmt == "xml":
-        return None, {
-            "type": "unsupported", "format": "xml", "reason": "converter_missing",
-            "detail": ("No general XML->HSG converter exists in this fork, so XML input is not "
-                       "supported end-to-end. Convert to .hsg/.spec, or add a converter. "
-                       "(Benchmark-specific XML flatteners are NOT used here — they are not general.)"),
-        }
+        # Auto-convert Eduction grammar XML -> .hsg via tools/xml_to_hsg.py (same dir). Faithful for
+        # literal dicts + regex + inlined (?A:name) composition; empty/oversized entities are reported,
+        # not faked.
+        try:
+            import tempfile
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import xml_to_hsg
+            outdir = tempfile.mkdtemp(prefix="xml2hsg_")
+            hsg, dicts, report = xml_to_hsg.convert(path, outdir, som=True, lit_threshold=1000)
+        except xml_to_hsg.ConvertError as e:
+            return None, {"type": "unsupported", "format": "xml", "reason": "xml_not_convertible",
+                          "detail": str(e)}
+        except Exception as e:  # ET.ParseError etc.
+            return None, {"type": "unsupported", "format": "xml", "reason": "xml_conversion_failed",
+                          "detail": str(e)}
+        outp = str(Path(outdir) / (Path(path).stem + ".hsg"))
+        Path(outp).write_text(hsg)
+        emitted = report["emitted"]
+        if not [e for e in emitted if not e.get("skipped")]:
+            return None, {"type": "unsupported", "format": "xml", "reason": "xml_no_convertible_entities",
+                          "detail": "all public entities were empty/unconvertible (decompiled XML carried "
+                                    "no data to convert)", "emitted": emitted}
+        return outp, {"type": "converted", "format": "xml", "converted_from": "xml",
+                      "converted_hsg": outp, "emitted": emitted,
+                      "note": "XML auto-converted to .hsg by tools/xml_to_hsg.py (SOM on). "
+                              "Oversized inlined compositions may still hit Hyperscan's pattern-length limit."}
     return None, {"type": "unsupported", "format": fmt, "reason": "unknown_format",
                   "detail": f"unrecognized grammar format '{fmt}'"}
 
@@ -102,16 +122,58 @@ def aggregate(runs):
 
 
 # ---------------------------------------------------------------- Eduction parity
-def _norm_ed_rows(rows):
-    """Drop pure-space tokens and strip one trailing space (same normalization as prior deliverables)."""
+def _norm_ed_rows(rows, corpus_name=None):
+    """Drop pure-space tokens and strip one trailing space (same normalization as prior deliverables).
+    If corpus_name is given, keep ONLY rows whose `file` column matches it — an Eduction CSV often
+    holds detections for several corpus files concatenated (e.g. a3__dense + a3__sparse), and comparing
+    those against a single scanned corpus would count the other file's rows as spurious FNs."""
     out = []
-    for (ent, s, e, text) in rows:
+    for row in rows:
+        fn, ent, s, e, text = row if len(row) == 5 else ("",) + tuple(row)
+        if corpus_name and fn and Path(fn).name != corpus_name:
+            continue  # this row belongs to a different corpus file
         if text.strip() == "" and text != "":
             continue  # pure-space artifact token
         if text.endswith(" ") and e > s:
             e -= 1
         out.append((s, e))
     return set(out)
+
+
+def leftmost_longest(pairs):
+    """Reduce a set of (start,end) spans to non-overlapping leftmost-longest — Eduction's reporting
+    model. Hyperscan reports EVERY end position for a match (e.g. 1173->1203, 1173->1206, 1173->1207);
+    this keeps the longest span at each start and drops spans that overlap an already-kept one.
+    A principled semantic alignment (documented), NOT a fudge to inflate agreement."""
+    spans = sorted(set(pairs), key=lambda p: (p[0], -p[1]))
+    kept, last_end = [], -1
+    for s, e in spans:
+        if s >= last_end:          # non-overlapping: first span at this start is the longest
+            kept.append((s, e))
+            last_end = e
+    return set(kept)
+
+
+def byte_to_char(pairs, corpus_bytes):
+    """Map byte offsets -> character offsets. Eduction reports CHARACTER offsets; Hyperscan reports
+    BYTE offsets. On multibyte (UTF-8) corpora these differ (e.g. 'Ö' is 1 char / 2 bytes), so a
+    byte-space span never equals the char-space Eduction span. Returns char-space (start,end) spans."""
+    # prefix[i] = number of characters in corpus_bytes[:i]. Built once, indexed per offset.
+    prefix = [0] * (len(corpus_bytes) + 1)
+    chars = 0
+    for i, b in enumerate(corpus_bytes):
+        # count a character at each byte that is NOT a UTF-8 continuation byte (0b10xxxxxx)
+        if (b & 0xC0) != 0x80:
+            chars += 1
+        prefix[i + 1] = chars
+    def c(o):
+        o = max(0, min(o, len(corpus_bytes)))
+        return prefix[o]
+    return set((c(s), c(e)) for (s, e) in pairs)
+
+
+def _has_multibyte(corpus_bytes):
+    return any(b & 0x80 for b in corpus_bytes)
 
 
 class EductionCsvSchemaError(Exception):
@@ -143,6 +205,7 @@ def load_eduction_csv(path):
     ei = find({"end_offset", "end_off", "end", "to"})
     ent_i = find({"entity", "type", "name"})
     txt_i = find({"text", "match", "matched_text"})
+    file_i = find({"file", "filename", "path", "doc", "document"})
     if si < 0 or ei < 0:
         raise EductionCsvSchemaError(
             f"no recognizable start/end columns in header {rows[0]} "
@@ -158,13 +221,30 @@ def load_eduction_csv(path):
             continue  # non-numeric row (e.g. stray blank) — skip, schema is still valid
         ent = r[ent_i].split("/")[-1] if 0 <= ent_i < len(r) else ""
         txt = r[txt_i] if 0 <= txt_i < len(r) else ""
-        out.append((ent, s, e, txt))
+        fn = r[file_i] if 0 <= file_i < len(r) else ""
+        out.append((fn, ent, s, e, txt))
     return out
 
 
-def parity_from_csv(vs_dets, ed_rows):
+def parity_from_csv(vs_dets, ed_rows, corpus_bytes=None, leftmost=True, char_offsets="auto",
+                    corpus_name=None):
+    """Compare VS spans to Eduction spans. Two documented, principled normalizations align the two
+    engines' reporting models before comparing (each recorded in the returned `normalization`):
+      - leftmost_longest: collapse Hyperscan's all-end-positions to Eduction's non-overlapping model.
+      - char_offsets: map VS byte offsets to character offsets on multibyte corpora (Eduction is char).
+    Both are OFF-switchable; neither invents matches."""
     vs = set((d["from"], d["to"]) for d in vs_dets)
-    ed = _norm_ed_rows(ed_rows)
+    ed = _norm_ed_rows(ed_rows, corpus_name=corpus_name)
+    norm = []
+    use_char = (char_offsets is True) or (char_offsets == "auto" and corpus_bytes is not None
+                                          and _has_multibyte(corpus_bytes))
+    if use_char and corpus_bytes is not None:
+        vs = byte_to_char(vs, corpus_bytes)
+        norm.append("char_offsets")
+    if leftmost:
+        vs = leftmost_longest(vs)
+        ed = leftmost_longest(ed)   # idempotent for Eduction (already non-overlapping); keeps it fair
+        norm.append("leftmost_longest")
     fp = sorted(vs - ed)   # in VS, not Eduction
     fn = sorted(ed - vs)   # in Eduction, not VS
     return {
@@ -172,6 +252,7 @@ def parity_from_csv(vs_dets, ed_rows):
         "false_positives": len(fp), "false_negatives": len(fn),
         "span_matched": len(vs & ed),
         "parity": (len(fp) == 0 and len(fn) == 0),
+        "normalization": norm or ["raw"],
         "fp_examples": fp[:10], "fn_examples": fn[:10],
     }
 
@@ -192,7 +273,15 @@ def compute_parity(args, dets):
             ed = load_eduction_csv(args.eduction_output)
         except EductionCsvSchemaError as e:
             return {"available": False, "reason": "eduction_csv_schema_error", "detail": str(e)}
-        return parity_from_csv(dets, ed)
+        corpus_bytes = None
+        try:
+            corpus_bytes = Path(args.corpus).read_bytes()
+        except OSError:
+            pass
+        return parity_from_csv(dets, ed, corpus_bytes=corpus_bytes,
+                               leftmost=not getattr(args, "no_leftmost_longest", False),
+                               char_offsets=(False if getattr(args, "no_char_offsets", False) else "auto"),
+                               corpus_name=Path(args.corpus).name)
     if args.eduction_bin:
         return run_eduction_bin(args.eduction_bin, args.corpus)
     return {"available": False, "reason": "no_eduction_data"}
@@ -404,6 +493,10 @@ def main():
     ap.add_argument("--apply-safe", action="store_true")
     ap.add_argument("--apply-risky", action="store_true")
     ap.add_argument("--fail-on-parity-regression", action="store_true")
+    ap.add_argument("--no-leftmost-longest", action="store_true",
+                    help="disable collapsing VS all-end-positions to Eduction's non-overlapping model")
+    ap.add_argument("--no-char-offsets", action="store_true",
+                    help="disable byte->char offset mapping on multibyte corpora (compare raw byte offsets)")
     args = ap.parse_args()
 
     if not Path(args.grammar).exists(): die(f"grammar not found: {args.grammar}")
@@ -413,7 +506,8 @@ def main():
     rep = {"grammar": args.grammar, "corpus": args.corpus, "format": fmt, "perf_guide": PERF_GUIDE}
 
     norm_path, finding = normalize_grammar(args.grammar, fmt)
-    if finding is not None:
+    if norm_path is None:
+        # No usable grammar (unsupported format / unconvertible XML) — report cleanly, do not benchmark.
         rep["unsupported"] = finding
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.out).write_text(json.dumps(rep, indent=2))
@@ -421,6 +515,11 @@ def main():
         info(f"report written: {args.out}")
         # Not a whole-PR failure: unsupported format is reported cleanly.
         return
+    if finding is not None:
+        # A usable path WITH an info finding (e.g. XML was auto-converted) — record and continue.
+        rep["conversion"] = finding
+        if finding.get("type") == "converted":
+            info(f"xml converted -> {finding['converted_hsg']}")
 
     exe = ensure_bench_exe(args)
 
