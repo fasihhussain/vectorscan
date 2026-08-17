@@ -109,7 +109,7 @@ def aggregate(runs):
         xs = [v[k] for v in vs]
         return {"median": round(statistics.median(xs), 4), "min": round(min(xs), 4), "max": round(max(xs), 4)}
     first = vs[0]
-    return {
+    out = {
         "runs": len(vs),
         "compile_ms": stat("compile_ms"),
         "scan_ms": stat("scan_ms"),
@@ -119,6 +119,9 @@ def aggregate(runs):
         "detections": first.get("detections", []),
         "detections_truncated": first.get("detections_truncated", False),
     }
+    if "rss_mb" in first:
+        out["rss_mb"] = stat("rss_mb")
+    return out
 
 
 # ---------------------------------------------------------------- Eduction parity
@@ -261,6 +264,54 @@ def run_eduction_bin(edbin, corpus):
     warn(f"--eduction-bin given ({edbin}) but live Eduction execution is environment-specific "
          "(jar + quarantine setup); not run here. Provide --eduction-output CSV for parity.")
     return {"available": False, "reason": "eduction_bin_not_run"}
+
+
+def load_perf_csv(path):
+    """Read a per-engine performance CSV (run_number,wall_ms,cpu_ms,rss_mb,detection). Excludes the
+    warmup run 0 and any non-numeric 'avg' summary row; returns median wall_ms / cpu_ms / rss_mb."""
+    walls, cpus, rss = [], [], []
+    with open(path, newline="") as f:
+        for r in csv.DictReader(f):
+            try:
+                if int(r["run_number"]) <= 0:       # skip warmup run 0 (and reject 'avg' via ValueError)
+                    continue
+            except (ValueError, TypeError, KeyError):
+                continue
+            def num(k, acc):
+                try: acc.append(float(r[k]))
+                except (ValueError, TypeError, KeyError): pass
+            num("wall_ms", walls); num("cpu_ms", cpus); num("rss_mb", rss)
+    if not walls:
+        return None
+    return {"wall_ms": statistics.median(walls),
+            "cpu_ms": statistics.median(cpus) if cpus else None,
+            "rss_mb": statistics.median(rss) if rss else None,
+            "runs": len(walls)}
+
+
+def head_to_head(vs_bench, ed_perf):
+    """VS-vs-Eduction time+memory comparison — the 'optimize' goal: is VS faster and lighter than
+    Eduction? VS time = compile_ms + scan_ms (median, this tool's live run); VS memory = peak RSS.
+    Eduction time/memory come from its performance CSV. Honest: reports the numbers and the verdict,
+    including when VS does NOT win (never asserts a win it didn't measure)."""
+    if ed_perf is None:
+        return {"available": False, "reason": "eduction_perf_unreadable"}
+    vs_wall = vs_bench["compile_ms"]["median"] + vs_bench["scan_ms"]["median"]
+    vs_rss = vs_bench.get("rss_mb", {}).get("median")
+    ed_wall, ed_rss = ed_perf["wall_ms"], ed_perf.get("rss_mb")
+    out = {
+        "available": True,
+        "vs_wall_ms": round(vs_wall, 4), "eduction_wall_ms": round(ed_wall, 4),
+        "time_speedup_x": round(ed_wall / vs_wall, 2) if vs_wall > 0 else None,
+        "vs_faster": vs_wall < ed_wall,
+        "note": "VS wall = compile_ms + scan_ms (in-process); Eduction wall = wall_ms from its perf CSV "
+                "(both are grammar-load/compile + scan of the same corpus).",
+    }
+    if vs_rss is not None and ed_rss is not None:
+        out.update(vs_rss_mb=round(vs_rss, 4), eduction_rss_mb=round(ed_rss, 4),
+                   memory_ratio_vs_over_ed=round(vs_rss / ed_rss, 3) if ed_rss > 0 else None,
+                   vs_less_memory=vs_rss < ed_rss)
+    return out
 
 
 def compute_parity(args, dets):
@@ -457,6 +508,18 @@ def to_markdown(rep):
               f"- scan_ms (median/min/max): {b['scan_ms']['median']} / {b['scan_ms']['min']} / {b['scan_ms']['max']}",
               f"- throughput_mb_s (median): {b['throughput_mb_s']['median']}",
               f"- matches: {b['matches']}  (corpus {b['corpus_bytes']} bytes; runs={b['runs']})"]
+        if b.get("rss_mb"):
+            L.append(f"- peak RSS MB (median/min/max): {b['rss_mb']['median']} / {b['rss_mb']['min']} / {b['rss_mb']['max']}")
+    h = rep.get("efficiency")
+    if h and h.get("available"):
+        L += ["", "## VS vs Eduction (time + memory)", "",
+              f"- **time:** VS {'faster' if h['vs_faster'] else 'SLOWER'} — {h.get('time_speedup_x')}x "
+              f"(VS {h['vs_wall_ms']} ms vs Eduction {h['eduction_wall_ms']} ms)"]
+        if "vs_rss_mb" in h:
+            L.append(f"- **memory:** VS {'lighter' if h['vs_less_memory'] else 'HEAVIER'} — "
+                     f"VS {h['vs_rss_mb']} MB vs Eduction {h['eduction_rss_mb']} MB "
+                     f"(ratio {h['memory_ratio_vs_over_ed']}x)")
+        L.append(f"- _{h['note']}_")
     p = rep.get("parity")
     L += ["", "## Eduction parity", ""]
     if p and p.get("available"):
@@ -485,7 +548,9 @@ def main():
     ap.add_argument("--build-dir", default="build")
     ap.add_argument("--bench-exe", default="build/bin/vs_grammar_bench")
     ap.add_argument("--target", default="vs_grammar_bench")
-    ap.add_argument("--eduction-output", help="existing Eduction detections CSV")
+    ap.add_argument("--eduction-output", help="existing Eduction detections CSV (correctness parity)")
+    ap.add_argument("--eduction-perf", help="Eduction performance CSV (run_number,wall_ms,cpu_ms,rss_mb) "
+                                            "for the VS-vs-Eduction time+memory head-to-head")
     ap.add_argument("--eduction-bin", help="path to Eduction binary (best-effort; usually not run here)")
     ap.add_argument("--repeat", type=int, default=5)
     ap.add_argument("--warmup", type=int, default=1)
@@ -538,6 +603,19 @@ def main():
     rep["parity"] = parity
     if parity.get("reason") == "eduction_csv_schema_error":
         warn(f"Eduction CSV schema error: {parity.get('detail')} — parity reported UNAVAILABLE (not a false 0)")
+
+    # VS-vs-Eduction time+memory head-to-head (the 'optimize' goal: faster + less memory than Eduction).
+    if args.eduction_perf:
+        if Path(args.eduction_perf).exists():
+            rep["efficiency"] = head_to_head(bench, load_perf_csv(args.eduction_perf))
+            h = rep["efficiency"]
+            if h.get("available"):
+                mem = (f", memory {h['vs_rss_mb']} vs {h['eduction_rss_mb']} MB "
+                       f"({'VS lighter' if h.get('vs_less_memory') else 'VS heavier'})") if "vs_rss_mb" in h else ""
+                info(f"efficiency: VS {'faster' if h['vs_faster'] else 'slower'} "
+                     f"{h.get('time_speedup_x')}x ({h['vs_wall_ms']} vs {h['eduction_wall_ms']} ms){mem}")
+        else:
+            rep["efficiency"] = {"available": False, "reason": "eduction_perf_not_found"}
 
     pats, partial, note = extract_patterns(norm_path, fmt)
     findings, note = static_findings(pats, note)

@@ -25,6 +25,21 @@
 #include <iterator>
 #include <string>
 #include <vector>
+#include <sys/resource.h> // getrusage -> peak RSS
+
+namespace {
+// Peak resident set size in MB. macOS ru_maxrss is BYTES; Linux is KiB. Same metric family as the
+// project's RSS pipeline (process peak RSS), so VS memory is comparable to the Eduction rss_mb column.
+double peakRssMb() {
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) != 0) return -1.0;
+#if defined(__APPLE__)
+    return (double)ru.ru_maxrss / (1024.0 * 1024.0);
+#else
+    return (double)ru.ru_maxrss / 1024.0;
+#endif
+}
+} // namespace
 
 namespace {
 struct Det { unsigned id; unsigned long long from, to; };
@@ -106,9 +121,10 @@ int main(int argc, char **argv) {
     double mb = (double)data.size() / (1024.0 * 1024.0);
     double thr = scan_ms > 0.0 ? mb / (scan_ms / 1000.0) : 0.0;
 
+    double rss_mb = peakRssMb();
     std::printf("{\"vectorscan\":{");
-    std::printf("\"compile_ms\":%.4f,\"scan_ms\":%.4f,\"matches\":%zu,\"corpus_bytes\":%zu,\"throughput_mb_s\":%.4f,",
-                compile_ms, scan_ms, ctx.total, data.size(), thr);
+    std::printf("\"compile_ms\":%.4f,\"scan_ms\":%.4f,\"rss_mb\":%.4f,\"matches\":%zu,\"corpus_bytes\":%zu,\"throughput_mb_s\":%.4f,",
+                compile_ms, scan_ms, rss_mb, ctx.total, data.size(), thr);
     std::printf("\"detections\":[");
     for (size_t i = 0; i < ctx.dets.size(); i++) {
         std::printf("%s{\"id\":%u,\"from\":%llu,\"to\":%llu}", i ? "," : "",

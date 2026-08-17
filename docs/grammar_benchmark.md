@@ -70,6 +70,22 @@ Note: the second example's paths live in the separate **Testing workspace**, not
 requires `.spec`/compose support (present on `develop` post-PR-#3). Use `tools/testdata/` for
 self-contained runs inside the fork.
 
+## VS-vs-Eduction time + memory head-to-head (`--eduction-perf`)
+The core "is Vectorscan faster and lighter than Eduction?" comparison. Give the tool an Eduction
+**performance CSV** (`run_number,wall_ms,cpu_ms,rss_mb,...`); the report's `efficiency` block reports:
+- **time** — VS wall (`compile_ms + scan_ms`, this tool's live run) vs Eduction `wall_ms` → speedup ×.
+- **memory** — VS **peak RSS** (`getrusage`, whole process) vs Eduction `rss_mb` → ratio.
+
+Both engines' medians exclude the warmup run 0. **Honest caveats:**
+- VS wall here **includes compile** (a one-time cost), so the speedup is *conservative* vs a scan-only
+  comparison.
+- VS memory is **whole-process peak RSS**, which includes the one-time `hs_compile` transient. On small
+  literal-dict/sequence compositions that transient can push VS peak **above** Eduction even though VS is
+  far faster; the project's dedicated RSS pipeline mitigates it (e.g. dropping `HS_FLAG_UCP`). The tool
+  reports what it measures and states when VS is heavier — it never hides a loss.
+- On the 15-grammar mentor suite (9 runnable): VS is **faster on all 9** (~7×–1165×) and **lighter on
+  6/9**; heavier on 3/9 (`addr_dict_s`, `money_seq`, `money_seq_nocomp`) under peak-RSS accounting.
+
 ## Eduction comparison modes
 - **`--eduction-output <csv>`** — compare VS detections to an existing Eduction CSV
   (`file,entity,text,start_offset,end_offset`). Column names are **normalized** (lowercased, trimmed,
