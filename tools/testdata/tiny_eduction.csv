@@ -1,0 +1,3 @@
+file,entity,text,start_offset,end_offset
+tiny_corpus.txt,fullname,John Smith,0,10
+tiny_corpus.txt,fullname,Jane Doe,15,23
