@@ -99,6 +99,9 @@ Both engines' medians exclude the warmup run 0. **Honest caveats:**
     - **corpus-file filter** — an Eduction CSV often concatenates detections for several corpus files
       (e.g. `a3__dense` + `a3__sparse`); only rows whose `file` column matches the scanned corpus are
       compared, so the other file's rows aren't counted as spurious FNs.
+    - **`vs_trailing_space`** (when corpus is available) — strips one trailing space from VS spans by
+      peeking at corpus bytes, restoring symmetry with the Eduction side (whose text column lets it drop
+      one trailing space). The exec emits only `from/to` (no text), so VS can't self-normalize otherwise.
     - **`leftmost_longest`** (default; `--no-leftmost-longest` to disable) — Hyperscan reports *every*
       end position for a match; this collapses them to Eduction's non-overlapping leftmost-longest model.
     - **`char_offsets`** (auto on multibyte corpora; `--no-char-offsets` to disable) — maps VS **byte**

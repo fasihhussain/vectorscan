@@ -157,6 +157,19 @@ def leftmost_longest(pairs):
     return set(kept)
 
 
+def strip_trailing_space_vs(pairs, corpus_bytes):
+    """Strip ONE trailing space from each VS byte-span whose last byte is ' '. The exec emits only
+    from/to (no matched text), so unlike the Eduction side (_norm_ed_rows strips one trailing space
+    via its text column) VS spans can't self-normalize — this restores the symmetry using the corpus
+    bytes. Mirrors exactly Eduction's one-trailing-space rule; never extends or invents a span."""
+    out = set()
+    for (s, e) in pairs:
+        if e > s and 0 <= e - 1 < len(corpus_bytes) and corpus_bytes[e - 1:e] == b" ":
+            e -= 1
+        out.add((s, e))
+    return out
+
+
 def byte_to_char(pairs, corpus_bytes):
     """Map byte offsets -> character offsets. Eduction reports CHARACTER offsets; Hyperscan reports
     BYTE offsets. On multibyte (UTF-8) corpora these differ (e.g. 'Ö' is 1 char / 2 bytes), so a
@@ -231,14 +244,20 @@ def load_eduction_csv(path):
 
 def parity_from_csv(vs_dets, ed_rows, corpus_bytes=None, leftmost=True, char_offsets="auto",
                     corpus_name=None):
-    """Compare VS spans to Eduction spans. Two documented, principled normalizations align the two
+    """Compare VS spans to Eduction spans. Documented, principled normalizations align the two
     engines' reporting models before comparing (each recorded in the returned `normalization`):
+      - vs_trailing_space: strip one trailing space from VS spans (symmetry with the Eduction side).
       - leftmost_longest: collapse Hyperscan's all-end-positions to Eduction's non-overlapping model.
       - char_offsets: map VS byte offsets to character offsets on multibyte corpora (Eduction is char).
-    Both are OFF-switchable; neither invents matches."""
+    All are OFF-switchable; none invent matches."""
     vs = set((d["from"], d["to"]) for d in vs_dets)
     ed = _norm_ed_rows(ed_rows, corpus_name=corpus_name)
     norm = []
+    if corpus_bytes is not None:
+        vs2 = strip_trailing_space_vs(vs, corpus_bytes)   # byte space, before char mapping
+        if vs2 != vs:
+            vs = vs2
+            norm.append("vs_trailing_space")
     use_char = (char_offsets is True) or (char_offsets == "auto" and corpus_bytes is not None
                                           and _has_multibyte(corpus_bytes))
     if use_char and corpus_bytes is not None:
