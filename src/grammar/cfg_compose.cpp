@@ -81,7 +81,9 @@ static bool connOk(int c, const std::string &s, size_t from, size_t to, const st
 static inline bool isWord(unsigned char c){return (c>='0'&&c<='9')||(c>='A'&&c<='Z')||(c>='a'&&c<='z')||c=='_';}
 static std::string trim(const std::string &s){size_t a=s.find_first_not_of(" \t\r\n");if(a==std::string::npos)return"";size_t b=s.find_last_not_of(" \t\r\n");return s.substr(a,b-a+1);}
 
-struct Step { int conn; std::string entity; std::string lit; };
+// A step matches ANY of `alts` (alternation / OR); `optional` allows skipping it. `entity` is kept
+// as alts[0] for the legacy single-entity paths. `conn`/`lit` = the connector-gap before this step.
+struct Step { int conn; std::string entity; std::string lit; std::vector<std::string> alts; bool optional=false; };
 struct Template { unsigned id; std::string name; std::vector<Step> steps; };
 
 class Cfg {
@@ -152,14 +154,23 @@ bool cfgAddComposeLine(Cfg *c, const std::string &line, std::string &err){
     for(auto &it:items){ if(it.empty()) continue;
         if(it.size()>=2&&it.front()=='"'&&it.back()=='"'){ pending=LITERAL; pendingLit=it.substr(1,it.size()-2); havePending=true; continue; }
         bool isC; int ck=connKeyword(it,isC); if(isC){ pending=ck; pendingLit.clear(); havePending=true; continue; }
-        Step st; st.entity=it; st.lit=pendingLit; st.conn=t.steps.empty()?NONE:(havePending?pending:SPACE);
+        Step st; st.lit=pendingLit; st.conn=t.steps.empty()?NONE:(havePending?pending:SPACE);
+        std::string item=it;
+        if(!item.empty()&&item.back()=='?'){ st.optional=true; item.pop_back(); item=trim(item); } // optional step: "entity?"
+        std::stringstream as(item); std::string alt;                                                // alternation: "a|b|c"
+        while(std::getline(as,alt,'|')){ alt=trim(alt); if(!alt.empty()) st.alts.push_back(alt); }
+        if(st.alts.empty()) continue;
+        st.entity=st.alts[0];
         t.steps.push_back(st); pending=SPACE; pendingLit.clear(); havePending=false;
     }
     if(t.steps.size()<2){ err="compose "+name+": needs >=2 components"; return false; }
-    for(auto &st:t.steps){
-        if(st.entity==name){ err="compose "+name+": self-reference"; return false; }
-        if(c->composeNames.count(st.entity)){ err="compose "+name+": references composite '"+st.entity+"' (depth>1 not allowed)"; return false; }
-        if(!c->ents.count(st.entity)){ err="compose "+name+": references missing/empty entity '"+st.entity+"'"; return false; }
+    for(auto &st:t.steps) for(auto &e:st.alts){
+        if(e==name){ err="compose "+name+": self-reference (cycle)"; return false; }
+        bool isFlat=c->ents.count(e)!=0, isComposite=c->composeNames.count(e)!=0;
+        if(!isFlat && !isComposite){ err="compose "+name+": references missing/empty entity '"+e+"'"; return false; }
+        // Composite refs are ALLOWED (chaining, depth>1). Indirect cycles are structurally impossible:
+        // a step may only reference an ALREADY-DEFINED composite, so the template list is a DAG in
+        // definition = topological order. Direct self-reference is rejected above.
     }
     c->ids.insert(id); c->names.insert(name); c->composeNames.insert(name); c->templates.push_back(std::move(t));
     return true;
@@ -180,18 +191,27 @@ bool cfgLoadSpec(Cfg *c, const std::string &path, const std::string &loc, std::s
                 if(!loc.empty()&&ty.find(loc)==std::string::npos){ok=false;break;} steps.push_back({specConn(cn),ty}); }
             if(!ok||steps.size()<2) continue;
             Template t; t.id=100000+nextId++; t.name="spec_t"+std::to_string(t.id);
-            for(size_t i=0;i<steps.size();i++){ Step st; st.conn=(i==0?NONE:steps[i].first); st.entity=steps[i].second; t.steps.push_back(st); }
+            for(size_t i=0;i<steps.size();i++){ Step st; st.conn=(i==0?NONE:steps[i].first); st.entity=steps[i].second; st.alts.push_back(steps[i].second); t.steps.push_back(st); }
             c->templates.push_back(std::move(t)); nt++; }
     }
     if(nt==0){ err="spec: no templates parsed (locale '"+loc+"')"; return false; } return true;
 }
 bool cfgCompile(Cfg *c, std::string &err){
-    std::set<std::string> used; for(auto &t:c->templates) for(auto &s:t.steps) used.insert(s.entity);
+    std::set<std::string> compositeNames; for(auto &t:c->templates) compositeNames.insert(t.name);
+    std::set<std::string> used; for(auto &t:c->templates) for(auto &s:t.steps) for(auto &e:s.alts) used.insert(e);
+    for(auto &t:c->templates) used.insert(t.name);   // composite OUTPUTS are types too (they hold composite spans at scan time)
     std::vector<const char*> ex; std::vector<unsigned> fl,id; std::vector<size_t> lens;
-    for(auto &en:used){ if(!c->ents.count(en)){ err="component missing at compile: "+en; return false; }
+    for(auto &en:used){
+        if(c->typeIdx.count(en)) continue;
         int ti=(int)c->typeName.size(); c->typeIdx[en]=ti; c->typeName.push_back(en);
-        for(auto &w:c->ents[en]){ ex.push_back(w.c_str()); fl.push_back(0/*no SOM*/); id.push_back((unsigned)c->id2type.size());
-            lens.push_back(w.size()); c->id2type.push_back(ti); c->litLen.push_back((uint32_t)w.size()); } }
+        if(c->ents.count(en)){                        // flat entity -> compile its literals into the component DB
+            for(auto &w:c->ents[en]){ ex.push_back(w.c_str()); fl.push_back(0/*no SOM*/); id.push_back((unsigned)c->id2type.size());
+                lens.push_back(w.size()); c->id2type.push_back(ti); c->litLen.push_back((uint32_t)w.size()); }
+        } else if(!compositeNames.count(en)){         // neither a flat dict nor a composite output -> genuine error
+            err="component missing at compile: "+en; return false;
+        }
+        // else: composite output type -> type index only, no literals (spans are produced at scan time by chaining)
+    }
     hs_compile_error_t *e=nullptr;
     if(hs_compile_lit_multi(ex.data(),fl.data(),id.data(),lens.data(),(unsigned)ex.size(),
                             HS_MODE_BLOCK,nullptr,&c->db,&e)!=HS_SUCCESS){ err=e&&e->message?e->message:"compile fail"; if(e)hs_free_compile_error(e); return false; }
@@ -264,19 +284,33 @@ extern "C" hs_error_t cfg_scan_dispatch(const hs_database_t *db, const char *dat
     for(auto &v:byType) std::sort(v.begin(),v.end(),[](const FT&a,const FT&b){return a.from<b.from;});
     auto pack=[](uint32_t a,uint32_t b){return ((uint64_t)a<<32)|b;};
     std::vector<CfgDet> out;
-    for(auto &t:meta.templates){ auto i0=meta.typeIdx.find(t.steps[0].entity); if(i0==meta.typeIdx.end()) continue; int t0=i0->second;
-        std::unordered_set<uint64_t> part; for(auto &ft:byType[t0]) part.insert(pack(ft.from,ft.to));
+    // gather candidate spans for a step = UNION over its alternatives (alternation / OR), sorted by start.
+    auto stepCands=[&](const Step &st)->std::vector<FT>{
+        std::vector<FT> bs;
+        for(auto &e:st.alts){ auto it=meta.typeIdx.find(e); if(it!=meta.typeIdx.end()){ auto &v=byType[it->second]; bs.insert(bs.end(),v.begin(),v.end()); } }
+        std::sort(bs.begin(),bs.end(),[](const FT&a,const FT&b){return a.from<b.from;});
+        return bs;
+    };
+    for(auto &t:meta.templates){
+        std::unordered_set<uint64_t> part; { std::vector<FT> seed=stepCands(t.steps[0]); for(auto &ft:seed) part.insert(pack(ft.from,ft.to)); }
         for(size_t k=1;k<t.steps.size()&&!part.empty();k++){ int conn=t.steps[k].conn; const std::string&lit=t.steps[k].lit;
-            auto ik=meta.typeIdx.find(t.steps[k].entity); if(ik==meta.typeIdx.end()){ part.clear(); break; }
-            const auto &bs=byType[ik->second]; std::unordered_set<uint64_t> nx;
+            std::vector<FT> bs=stepCands(t.steps[k]); std::unordered_set<uint64_t> nx;
             for(uint64_t v:part){ uint32_t start=(uint32_t)(v>>32),pos=(uint32_t)v; uint32_t amax=(uint32_t)std::min<size_t>(pos+MAXGAP,len);
                 auto lo=std::lower_bound(bs.begin(),bs.end(),pos,[](const FT&f,uint32_t p){return f.from<p;});
                 for(auto it=lo; it!=bs.end()&&it->from<=amax; ++it) if(connOk(conn,s,pos,it->from,lit)) nx.insert(pack(start,it->to)); }
+            if(t.steps[k].optional) for(uint64_t v:part) nx.insert(v);   // optional step: also keep the un-extended partial
             part.swap(nx); }
+        // Chaining: feed this template's composite spans back into the span map so later templates
+        // (which appear after it in definition = topological order) can consume them as components.
+        // Flat/1-layer grammars have nothing referencing these outputs, so their behavior is unchanged.
+        auto oit=meta.typeIdx.find(t.name); int outIdx=(oit!=meta.typeIdx.end())?oit->second:-1;
+        std::vector<FT> *bucket=(outIdx>=0 && outIdx<(int)byType.size())?&byType[outIdx]:nullptr;
         for(uint64_t v:part){ uint32_t st=(uint32_t)(v>>32),en=(uint32_t)v;
+            if(bucket) bucket->push_back({st,en});          // available to downstream composites
             if(st>0&&isWord((unsigned char)s[st-1])&&isWord((unsigned char)s[st])) continue;
             if(en<len&&isWord((unsigned char)s[en-1])&&isWord((unsigned char)s[en])) continue;
-            out.push_back({t.id,st,en}); } }
+            out.push_back({t.id,st,en}); }
+        if(bucket) std::sort(bucket->begin(),bucket->end(),[](const FT&a,const FT&b){return a.from<b.from;}); }
     std::sort(out.begin(),out.end(),[](const CfgDet&a,const CfgDet&b){return a.from<b.from||(a.from==b.from&&a.to>b.to);});
     for(auto &d:out){ int r=onEvent?onEvent(d.id,(unsigned long long)d.from,(unsigned long long)d.to,0,userCtx):0;
         if(r!=0) return HS_SCAN_TERMINATED; } // composite callback early-return honored
@@ -355,7 +389,8 @@ static void writeMeta(std::ostream &sc, const CfgMeta &m, uint32_t dbcrc){
     sc<<"ID2TYPE "<<m.id2type.size()<<"\n"; for(size_t i=0;i<m.id2type.size();i++) sc<<m.id2type[i]<<" "<<m.litLen[i]<<"\n";
     sc<<"TEMPLATES "<<m.templates.size()<<"\n";
     for(auto&t:m.templates){ sc<<t.id<<" "<<t.name<<" "<<t.steps.size()<<"\n";
-        for(auto&s:t.steps) sc<<s.conn<<"\t"<<s.entity<<"\t"<<s.lit<<"\n"; }
+        for(auto&s:t.steps){ std::string a; for(size_t j=0;j<s.alts.size();j++){ if(j) a+="|"; a+=s.alts[j]; }
+            sc<<s.conn<<"\t"<<a<<"\t"<<s.lit<<"\t"<<(s.optional?1:0)<<"\n"; } }
 }
 static bool readMeta(std::istream &sc, CfgMeta &m, uint32_t &dbcrc, std::string &err){
     std::string tok; int ver=0;
@@ -375,9 +410,11 @@ static bool readMeta(std::istream &sc, CfgMeta &m, uint32_t &dbcrc, std::string 
         std::istringstream hh(hdr); Template t; size_t nsteps=0;
         if(!(hh>>t.id>>t.name>>nsteps) || nsteps<1){ err="sidecar: bad template header"; return false; }
         for(size_t k=0;k<nsteps;k++){ std::string sl; if(!std::getline(sc,sl)){ err="sidecar: truncated template steps"; return false; }
-            std::istringstream ls(sl); Step st; std::string connS,ent,lit;
-            std::getline(ls,connS,'\t'); std::getline(ls,ent,'\t'); std::getline(ls,lit,'\t');
-            st.conn=std::atoi(connS.c_str()); st.entity=ent; st.lit=lit; t.steps.push_back(st); }
+            std::istringstream ls(sl); Step st; std::string connS,ent,lit,optS;
+            std::getline(ls,connS,'\t'); std::getline(ls,ent,'\t'); std::getline(ls,lit,'\t'); std::getline(ls,optS,'\t');
+            st.conn=std::atoi(connS.c_str()); st.lit=lit; st.optional=(optS=="1");
+            { std::stringstream as(ent); std::string alt; while(std::getline(as,alt,'|')) if(!alt.empty()) st.alts.push_back(alt); }
+            st.entity=st.alts.empty()?"":st.alts[0]; t.steps.push_back(st); }
         m.templates.push_back(std::move(t)); }
     if(m.id2type.size()!=nid || m.litLen.size()!=nid || m.templates.size()!=ntpl){ err="sidecar: count mismatch"; return false; }
     return true;
@@ -416,7 +453,8 @@ bool cfgSerialize(Cfg *c, const std::string &dbPath, const std::string &sidecarP
     sc<<"ID2TYPE "<<c->id2type.size()<<"\n"; for(size_t i=0;i<c->id2type.size();i++) sc<<c->id2type[i]<<" "<<c->litLen[i]<<"\n";
     sc<<"TEMPLATES "<<c->templates.size()<<"\n";
     for(auto&t:c->templates){ sc<<t.id<<" "<<t.name<<" "<<t.steps.size()<<"\n";
-        for(auto&s:t.steps) sc<<s.conn<<"\t"<<s.entity<<"\t"<<s.lit<<"\n"; }
+        for(auto&s:t.steps){ std::string a; for(size_t j=0;j<s.alts.size();j++){ if(j) a+="|"; a+=s.alts[j]; }
+            sc<<s.conn<<"\t"<<a<<"\t"<<s.lit<<"\t"<<(s.optional?1:0)<<"\n"; } }
     return true;
 }
 Cfg *cfgDeserialize(const std::string &dbPath, const std::string &sidecarPath, std::string &err){
@@ -434,8 +472,10 @@ Cfg *cfgDeserialize(const std::string &dbPath, const std::string &sidecarPath, s
     for(size_t i=0;i<ntpl;i++){ Template t; std::string hdr; std::getline(sc,hdr); std::istringstream hs(hdr);
         size_t nsteps; hs>>t.id>>t.name>>nsteps;
         for(size_t k=0;k<nsteps;k++){ std::string sl; std::getline(sc,sl); std::istringstream ls(sl);
-            Step st; std::string connS,ent,lit; std::getline(ls,connS,'\t'); std::getline(ls,ent,'\t'); std::getline(ls,lit,'\t');
-            st.conn=std::atoi(connS.c_str()); st.entity=ent; st.lit=lit; t.steps.push_back(st); }
+            Step st; std::string connS,ent,lit,optS; std::getline(ls,connS,'\t'); std::getline(ls,ent,'\t'); std::getline(ls,lit,'\t'); std::getline(ls,optS,'\t');
+            st.conn=std::atoi(connS.c_str()); st.lit=lit; st.optional=(optS=="1");
+            { std::stringstream as(ent); std::string alt; while(std::getline(as,alt,'|')) if(!alt.empty()) st.alts.push_back(alt); }
+            st.entity=st.alts.empty()?"":st.alts[0]; t.steps.push_back(st); }
         c->templates.push_back(std::move(t)); }
     return c;
 }

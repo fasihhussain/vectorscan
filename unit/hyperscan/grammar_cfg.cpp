@@ -101,6 +101,22 @@ protected:
             "dict firstname pt_first.txt\n"
             "dict lastname pt_last.txt\n"
             "compose 9000 namefirstlast: firstname, lastname\n");
+        // chaining: alternation (OR) — a step "female|male"
+        writeFile("female.txt", "Mary\n"); writeFile("male.txt", "John\n");
+        writeFile("names_alt.hsg",
+            "dict female female.txt\ndict male male.txt\ndict lastname lastname.txt\n"
+            "compose 9000 personlast: female|male, lastname\n");
+        // chaining: optional step — "suffix?"
+        writeFile("names_opt.hsg",
+            "dict firstname firstname.txt\ndict lastname lastname.txt\ndict suffix suffix.txt\n"
+            "compose 9000 name_optsuffix: firstname, lastname, suffix?\n");
+        // chaining: depth-3 (broad_list-style) — quad -> triple -> pair -> tok
+        writeFile("tok.txt", "John\nSmith\nMary\nJane\n");
+        writeFile("names_depth3.hsg",
+            "dict tok tok.txt\n"
+            "compose 9000 pair: tok, tok\n"       // depth-1
+            "compose 9001 triple: pair, tok\n"    // depth-2 (uses pair)
+            "compose 9002 quad: triple, tok\n");  // depth-3 (uses triple -> pair)
         // Self-contained .spec fixture (P = component literal by type; T = template of conn:type).
         // Locale-filterable (types carry the "engcn" suffix); exercises the broad_list_name front door
         // without depending on the 228k-line external spec.
@@ -171,9 +187,35 @@ TEST_F(GrammarCFGCompose, RejectSelfRef) {
     hs_database_t *db = nullptr; EXPECT_EQ(HS_COMPILER_ERROR, compileCompose("selfref.hsg", &db));
     EXPECT_EQ(nullptr, db);
 }
-TEST_F(GrammarCFGCompose, RejectNestedCompose) {
-    hs_database_t *db = nullptr; EXPECT_EQ(HS_COMPILER_ERROR, compileCompose("nested.hsg", &db));
-    EXPECT_EQ(nullptr, db);
+TEST_F(GrammarCFGCompose, AlternationEitherFirst) {
+    // CHAINING: a step "female|male" matches either alternative.
+    hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("names_alt.hsg", &db));
+    EXPECT_TRUE(hasComposite(db, "Mary Smith", 9000, 0, 10));   // OR picked female
+    EXPECT_TRUE(hasComposite(db, "John Smith", 9000, 0, 10));   // OR picked male
+    hs_free_database(db);
+}
+TEST_F(GrammarCFGCompose, OptionalStepSkippedOrPresent) {
+    // CHAINING: a trailing "suffix?" is optional — composite forms with OR without it.
+    hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("names_opt.hsg", &db));
+    EXPECT_TRUE(hasComposite(db, "John Smith",    9000, 0, 10));  // suffix skipped
+    EXPECT_TRUE(hasComposite(db, "John Smith Jr", 9000, 0, 13));  // suffix present
+    hs_free_database(db);
+}
+TEST_F(GrammarCFGCompose, ChainDepth3BroadListStyle) {
+    // depth-3 chain (matches broad_list's max depth): quad -> triple -> pair -> tok.
+    hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("names_depth3.hsg", &db));
+    EXPECT_TRUE(hasComposite(db, "John Smith Mary Jane", 9000, 0, 10));  // pair   (depth-1)
+    EXPECT_TRUE(hasComposite(db, "John Smith Mary Jane", 9001, 0, 15));  // triple (depth-2, uses pair)
+    EXPECT_TRUE(hasComposite(db, "John Smith Mary Jane", 9002, 0, 20));  // quad   (depth-3, uses triple->pair)
+    hs_free_database(db);
+}
+TEST_F(GrammarCFGCompose, ChainNestedCompose) {
+    // CHAINING: nested compose (a composite referencing another composite) is now SUPPORTED.
+    // nested.hsg: 9000 base = firstname lastname ; 9001 nested = base lastname  (depth-2)
+    hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("nested.hsg", &db));
+    EXPECT_TRUE(hasComposite(db, "John Smith Jones", 9000, 0, 10));   // base (depth-1)
+    EXPECT_TRUE(hasComposite(db, "John Smith Jones", 9001, 0, 16));   // nested uses base (depth-2)
+    hs_free_database(db);
 }
 TEST_F(GrammarCFGCompose, RejectMissingEntity) {
     hs_database_t *db = nullptr; EXPECT_EQ(HS_COMPILER_ERROR, compileCompose("missing.hsg", &db));
