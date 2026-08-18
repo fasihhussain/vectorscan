@@ -14,8 +14,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>     // phase timing (env-gated, measurement only)
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>    // getenv (VS_CFG_TIMING_OUT)
 #include <cstring>
 #include <fstream>
 #include <map>
@@ -277,7 +279,13 @@ extern "C" hs_error_t cfg_scan_dispatch(const hs_database_t *db, const char *dat
     int NT=(int)meta.typeName.size();
     std::vector<std::vector<FT>> byType(NT);
     CollectCtx cc{&meta,&byType};
+    // Optional phase timing (env-gated -> zero behaviour change when unset): split the base component
+    // scan (regex/literal matching) from the position-join (the CFG "Earley"/composition phase).
+    const char *cfgTimingOut = std::getenv("VS_CFG_TIMING_OUT");
+    std::chrono::steady_clock::time_point _pt0, _pt1, _pt2;
+    if(cfgTimingOut) _pt0 = std::chrono::steady_clock::now();
     hs_error_t rv=hs_scan_i(db,data,length,flags,scratch,cfg_collect_cb,&cc);
+    if(cfgTimingOut) _pt1 = std::chrono::steady_clock::now();
     if(rv!=HS_SUCCESS) return rv; // real scan error -> no composites emitted (collection never self-halts)
     // ---- position-join (close-to-verbatim from cfgScan / vs_chain_bench :350-360) ----
     std::string s(data,length); size_t len=length;
@@ -312,6 +320,17 @@ extern "C" hs_error_t cfg_scan_dispatch(const hs_database_t *db, const char *dat
             out.push_back({t.id,st,en}); }
         if(bucket) std::sort(bucket->begin(),bucket->end(),[](const FT&a,const FT&b){return a.from<b.from;}); }
     std::sort(out.begin(),out.end(),[](const CfgDet&a,const CfgDet&b){return a.from<b.from||(a.from==b.from&&a.to>b.to);});
+    if(cfgTimingOut){
+        _pt2 = std::chrono::steady_clock::now();
+        double regex_ms  = std::chrono::duration<double,std::milli>(_pt1-_pt0).count();  // base scan
+        double earley_ms = std::chrono::duration<double,std::milli>(_pt2-_pt1).count();  // position-join
+        // keyval side-file (scalable: add more phases as more lines). The exec reads it back and folds
+        // regex_ms/earley_ms into its JSON. Same-process channel, no exported cfg symbol (containment).
+        if(FILE *tf=std::fopen(cfgTimingOut,"w")){
+            std::fprintf(tf,"regex_ms=%.6f\nearley_ms=%.6f\n",regex_ms,earley_ms);
+            std::fclose(tf);
+        }
+    }
     for(auto &d:out){ int r=onEvent?onEvent(d.id,(unsigned long long)d.from,(unsigned long long)d.to,0,userCtx):0;
         if(r!=0) return HS_SCAN_TERMINATED; } // composite callback early-return honored
     return HS_SUCCESS;

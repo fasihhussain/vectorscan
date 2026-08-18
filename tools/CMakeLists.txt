@@ -17,3 +17,9 @@ foreach(e ${dirents})
         add_subdirectory(${e})
     endif ()
 endforeach ()
+
+# vs_grammar_bench — grammar benchmark executable (compile+scan measurement -> JSON on stdout).
+# Drives the public hs_compile_multi() + HS_FLAG_GRAMMAR_REF path; no engine changes. Consumed by
+# tools/vs_grammar_bench.py. Build: cmake --build build --target vs_grammar_bench -j
+add_executable(vs_grammar_bench vs_grammar_bench_exec.cpp)
+target_link_libraries(vs_grammar_bench hs)
