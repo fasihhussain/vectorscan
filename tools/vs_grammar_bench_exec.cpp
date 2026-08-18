@@ -20,11 +20,13 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>        // setenv (VS_CFG_TIMING_OUT)
 #include <cstring>
 #include <fstream>
 #include <iterator>
 #include <string>
 #include <vector>
+#include <unistd.h>       // getpid (unique timing side-file)
 #include <sys/resource.h> // getrusage -> peak RSS
 
 namespace {
@@ -109,6 +111,13 @@ int main(int argc, char **argv) {
     if (hs_alloc_scratch(db, &scr) != HS_SUCCESS) {
         std::printf("{\"error\":\"scratch_alloc_failed\"}\n"); hs_free_database(db); return 1;
     }
+    // Ask the CFG engine to record its internal phase split (base regex scan vs position-join /
+    // "Earley" composition) to a side-file for this scan. For plain (non-compose) grammars the CFG
+    // dispatcher never runs, so the file stays absent -> we report the whole scan as regex time.
+    std::string timingPath = "/tmp/vs_cfg_timing_" + std::to_string((long)getpid()) + ".txt";
+    std::remove(timingPath.c_str());
+    setenv("VS_CFG_TIMING_OUT", timingPath.c_str(), 1);
+
     Ctx ctx; ctx.cap = maxDet;
     auto s0 = std::chrono::steady_clock::now();
     hs_error_t sc = hs_scan(db, data.data(), (unsigned)data.size(), 0, scr, onMatch, &ctx);
@@ -121,10 +130,27 @@ int main(int argc, char **argv) {
     double mb = (double)data.size() / (1024.0 * 1024.0);
     double thr = scan_ms > 0.0 ? mb / (scan_ms / 1000.0) : 0.0;
 
+    // Phase split: defaults for a plain grammar (all scan time is regex, no composition phase).
+    double regex_ms = scan_ms, earley_ms = 0.0; bool phase_split = false;
+    if (std::ifstream tf{timingPath}) {                 // present only when the CFG dispatcher ran
+        std::string line;
+        while (std::getline(tf, line)) {
+            auto eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            std::string k = line.substr(0, eq);
+            double v = std::atof(line.substr(eq + 1).c_str());
+            if (k == "regex_ms") { regex_ms = v; phase_split = true; }
+            else if (k == "earley_ms") { earley_ms = v; }
+        }
+    }
+    std::remove(timingPath.c_str());
+
     double rss_mb = peakRssMb();
     std::printf("{\"vectorscan\":{");
-    std::printf("\"compile_ms\":%.4f,\"scan_ms\":%.4f,\"rss_mb\":%.4f,\"matches\":%zu,\"corpus_bytes\":%zu,\"throughput_mb_s\":%.4f,",
-                compile_ms, scan_ms, rss_mb, ctx.total, data.size(), thr);
+    std::printf("\"compile_ms\":%.4f,\"scan_ms\":%.4f,\"regex_ms\":%.4f,\"earley_ms\":%.4f,\"phase_split\":%s,"
+                "\"rss_mb\":%.4f,\"matches\":%zu,\"corpus_bytes\":%zu,\"throughput_mb_s\":%.4f,",
+                compile_ms, scan_ms, regex_ms, earley_ms, phase_split ? "true" : "false",
+                rss_mb, ctx.total, data.size(), thr);
     std::printf("\"detections\":[");
     for (size_t i = 0; i < ctx.dets.size(); i++) {
         std::printf("%s{\"id\":%u,\"from\":%llu,\"to\":%llu}", i ? "," : "",

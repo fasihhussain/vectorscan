@@ -42,6 +42,21 @@ findings, and (conservatively) apply optimizations with before/after evidence.
     from the decompiled XML because the XML carries only the leaf dicts + connector fragments, not the
     composition — reported, not faked.
 
+## Timing phases (compile / regex / Earley)
+The report breaks VS processing into three phases (median ms), so you can see where time goes:
+- **VS compilation** (`compile_ms`) — `hs_compile_multi` building the pattern database.
+- **regex processing** (`regex_ms`) — the base literal/regex scan (`hs_scan`).
+- **Earley/composition** (`earley_ms`) — the CFG **position-join** that assembles composites. (We have
+  no literal Earley parser; this is the moral equivalent — the composition phase.) Only compose
+  grammars (`.spec` / `.hsg compose`, e.g. broad_list) have it; **plain/flat-regex grammars report
+  `earley_ms = 0` and `phase_split = false`** (their whole scan is regex).
+
+How it's measured (scalable, containment-preserving): the CFG engine records the two scan-phase
+timings **only when `VS_CFG_TIMING_OUT` is set** (env-gated → zero overhead and zero behaviour change
+otherwise) to a keyval side-file; the exec sets that env, reads the file back, and folds `regex_ms` /
+`earley_ms` into its JSON. No cfg symbol is exported. `scan_ms` remains the authoritative total wall
+(it also covers dispatch setup + result emission, so `scan_ms ≥ regex_ms + earley_ms`).
+
 ## Build-check
 On startup, if the exec is missing the script runs (using `cmake --build`, not raw `make`):
 ```

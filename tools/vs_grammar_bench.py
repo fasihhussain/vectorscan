@@ -111,8 +111,8 @@ def aggregate(runs):
     first = vs[0]
     out = {
         "runs": len(vs),
-        "compile_ms": stat("compile_ms"),
-        "scan_ms": stat("scan_ms"),
+        "compile_ms": stat("compile_ms"),            # VS compilation time (hs_compile_multi)
+        "scan_ms": stat("scan_ms"),                  # total scan (regex + composition, if any)
         "throughput_mb_s": stat("throughput_mb_s"),
         "matches": first["matches"],
         "corpus_bytes": first["corpus_bytes"],
@@ -121,6 +121,12 @@ def aggregate(runs):
     }
     if "rss_mb" in first:
         out["rss_mb"] = stat("rss_mb")
+    # phase split (from the CFG engine): base regex/literal scan vs position-join ("Earley"/composition).
+    if "regex_ms" in first:
+        out["regex_ms"] = stat("regex_ms")           # regex/literal processing time
+    if "earley_ms" in first:
+        out["earley_ms"] = stat("earley_ms")         # composition ("Earley") time; 0 for plain grammars
+    out["phase_split"] = bool(first.get("phase_split", False))  # True only when CFG composition ran
     return out
 
 
@@ -529,6 +535,12 @@ def to_markdown(rep):
               f"- matches: {b['matches']}  (corpus {b['corpus_bytes']} bytes; runs={b['runs']})"]
         if b.get("rss_mb"):
             L.append(f"- peak RSS MB (median/min/max): {b['rss_mb']['median']} / {b['rss_mb']['min']} / {b['rss_mb']['max']}")
+        if "regex_ms" in b:
+            L += ["", "### Phase breakdown (median ms)", "",
+                  f"- **VS compilation** (`hs_compile_multi`): {b['compile_ms']['median']}",
+                  f"- **regex processing** (base scan): {b['regex_ms']['median']}",
+                  f"- **Earley/composition** (CFG position-join): {b.get('earley_ms',{}).get('median',0)}"
+                  + ("" if b.get("phase_split") else "  _(plain grammar — no composition phase; scan = regex)_")]
     h = rep.get("efficiency")
     if h and h.get("available"):
         L += ["", "## VS vs Eduction (time + memory)", "",
