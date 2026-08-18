@@ -585,6 +585,10 @@ def main():
         rep["conversion"] = finding
         if finding.get("type") == "converted":
             info(f"xml converted -> {finding['converted_hsg']}")
+    # Effective format for STATIC analysis: when XML is auto-converted, the grammar actually
+    # benchmarked is the converted .hsg (import format), so perf-guide findings must analyze THAT,
+    # not the original XML (extract_patterns has no XML path -> it would return empty findings).
+    eff_fmt = "hsg" if (finding and finding.get("type") == "converted") else fmt
 
     exe = ensure_bench_exe(args)
 
@@ -617,15 +621,17 @@ def main():
         else:
             rep["efficiency"] = {"available": False, "reason": "eduction_perf_not_found"}
 
-    pats, partial, note = extract_patterns(norm_path, fmt)
+    pats, partial, note = extract_patterns(norm_path, eff_fmt)
     findings, note = static_findings(pats, note)
-    if fmt == "spec":
+    if eff_fmt == "spec":
         rx_finding = spec_regex_component_finding(norm_path)
         if rx_finding is not None:
             findings.append(rx_finding)
             warn(f"spec: {rx_finding['kind']} — {rx_finding['detail']}")
     rep["static_findings"] = findings
     rep["static_partial"] = partial
+    rep["static_analysis_format"] = eff_fmt       # what was actually analyzed (hsg after XML convert)
+    rep["static_analysis_target"] = norm_path     # the effective grammar file (converted .hsg for XML)
     if note:
         rep["static_note"] = note
 

@@ -112,7 +112,9 @@ Both engines' medians exclude the warmup run 0. **Honest caveats:**
 
 ## Static-analysis findings (perf guide)
 Best-effort, extracted per format (compose/`.spec` grammars are literal-based, so few regex-level
-checks apply — reported honestly). Findings are **potential optimization opportunities, not proven
+checks apply — reported honestly). For **XML input**, analysis runs on the **converted `.hsg`** that is
+actually benchmarked (the report records `static_analysis_format` / `static_analysis_target`), so an
+XML grammar surfaces the same findings (e.g. `som_leftmost`, `large_alternation`) as its converted HSG. Findings are **potential optimization opportunities, not proven
 bugs**: leading `.*`/`.+`, no required literal, large bounded repeats `{100,1000}`, nested quantifiers,
 case-insensitive broad tokens, `SOM_LEFTMOST` usage, and possible SINGLEMATCH/DOTALL/anchoring
 opportunities. **Large alternation is flagged only as a compile-time/DB-size/memory investigation
