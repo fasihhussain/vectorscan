@@ -186,6 +186,22 @@ TEST_F(GrammarCFGCompose, BraceRejectEmbeddedPattern) {
     EXPECT_EQ(HS_COMPILER_ERROR, compileCompose("brace_bad.hsg", &db));       // rejected, not compiled
     EXPECT_EQ(nullptr, db);
 }
+// Test F: a brace-case .hsg for the "{John Smith}" use-case must contain the NEW Option B syntax
+// (escaped literal braces) rather than the old comma syntax, and that exact text must behave per Option B.
+TEST_F(GrammarCFGCompose, BraceFixtureUsesNewSyntax) {
+    writeFile("brace_fixture.hsg", "dict first firstname.txt\ndict last lastname.txt\n"
+                                   "compose 9000 fullname: \\{{first} {last}\\}\n");
+    // (1) the .hsg text uses the new brace syntax, NOT the old comma syntax
+    std::ifstream in(g_dir + "/brace_fixture.hsg");
+    std::string text, line; while (std::getline(in, line)) { text += line; text += "\n"; }
+    EXPECT_NE(std::string::npos, text.find("compose 9000 fullname: \\{{first} {last}\\}"));
+    EXPECT_EQ(std::string::npos, text.find("compose 9000 fullname: first, last"));
+    // (2) that exact grammar behaves per Option B
+    hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("brace_fixture.hsg", &db));
+    EXPECT_TRUE(hasComposite(db, "{John Smith}", 9000, 0, 12));   // braces included in the span
+    EXPECT_FALSE(anyComposite(db, "John Smith", 9000));           // plain text does NOT match
+    hs_free_database(db);
+}
 TEST_F(GrammarCFGCompose, ValidLastCommaFirst) {
     hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("names.hsg", &db));
     EXPECT_TRUE(hasComposite(db, "Smith, John", 9001, 0, 11));

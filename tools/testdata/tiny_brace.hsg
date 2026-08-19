@@ -1,0 +1,3 @@
+dict first first.txt
+dict last last.txt
+compose 9000 fullname: \{{first} {last}\}
