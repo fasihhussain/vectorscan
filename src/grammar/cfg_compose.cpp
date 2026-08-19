@@ -141,6 +141,55 @@ static int connKeyword(const std::string &s,bool &isConn){
     if(s=="initials")return INITIALS; if(s=="comma_init")return COMMA_INIT; if(s=="name")return NAME;
     isConn=false; return SPACE;
 }
+static inline bool braceSpace(char ch){ return ch==' '||ch=='\t'||ch=='\r'||ch=='\n'; }
+// Option B brace-expression compose body -> t.steps + synthetic literal entities in c->ents.
+// Grammar:  \{ \} \\ = literal brace / backslash;  {name} = entity ref;  {name?} = optional;
+// {a|b} = alternation; whitespace between components = SPACE connector, adjacency = NONE.
+// Non-space literal chunks (leading / middle / trailing) become synthetic single-literal entities
+// (`__cfg_lit_<id>_<k>`) added to c->ents, so cfgCompile compiles them like normal components and the
+// existing cfg_scan_dispatch offset-join handles everything with NO runtime change.
+// `[entity]` embedded-pattern syntax is OUT OF SCOPE and rejected.
+static bool parseBraceComposeExpr(Cfg *c, unsigned id, const std::string &body,
+                                  Template &t, std::string &err){
+    std::string litbuf; int litIdx=0; bool pendingSpace=false;
+    auto flushLit=[&](){
+        if(litbuf.empty()) return;
+        std::string nm="__cfg_lit_"+std::to_string(id)+"_"+std::to_string(litIdx++);
+        c->ents[nm]=std::vector<std::string>{litbuf};       // synthetic single-literal component dict
+        Step st; st.entity=nm; st.alts.push_back(nm);
+        st.conn = t.steps.empty()?NONE:(pendingSpace?SPACE:NONE);
+        t.steps.push_back(std::move(st));
+        litbuf.clear(); pendingSpace=false;
+    };
+    size_t i=0,n=body.size();
+    while(i<n){
+        char ch=body[i];
+        if(ch=='\\'){                                        // escape -> literal brace/backslash
+            if(i+1<n&&(body[i+1]=='{'||body[i+1]=='}'||body[i+1]=='\\')){ litbuf+=body[i+1]; i+=2; continue; }
+            err="compose "+t.name+": invalid escape (only \\{ \\} \\\\ allowed)"; return false;
+        }
+        if(braceSpace(ch)){ flushLit(); pendingSpace=true; i++; continue; }   // whitespace = SPACE connector
+        if(ch=='['){ err="embedded [entity] pattern syntax is out of scope"; return false; }
+        if(ch=='}'){ err="compose "+t.name+": unexpected '}' (use \\} for a literal brace)"; return false; }
+        if(ch=='{'){                                         // entity reference {name} / {name?} / {a|b}
+            flushLit();
+            size_t j=body.find('}',i+1);
+            if(j==std::string::npos){ err="compose "+t.name+": unclosed '{'"; return false; }
+            std::string ref=trim(body.substr(i+1,j-(i+1)));
+            if(ref.find('[')!=std::string::npos){ err="embedded [entity] pattern syntax is out of scope"; return false; }
+            Step st; st.conn=t.steps.empty()?NONE:(pendingSpace?SPACE:NONE);
+            if(!ref.empty()&&ref.back()=='?'){ st.optional=true; ref.pop_back(); ref=trim(ref); }
+            std::stringstream as(ref); std::string alt;
+            while(std::getline(as,alt,'|')){ alt=trim(alt); if(!alt.empty()) st.alts.push_back(alt); }
+            if(st.alts.empty()){ err="compose "+t.name+": empty {} reference"; return false; }
+            st.entity=st.alts[0]; t.steps.push_back(std::move(st));
+            pendingSpace=false; i=j+1; continue;
+        }
+        litbuf+=ch; i++;                                     // ordinary literal char (e.g. '-')
+    }
+    flushLit();                                              // trailing literal chunk
+    return true;
+}
 bool cfgAddComposeLine(Cfg *c, const std::string &line, std::string &err){
     std::istringstream is(line); std::string kw; is>>kw; if(kw!="compose"){ err="not a compose line"; return false; }
     unsigned id; if(!(is>>id)){ err="compose: missing numeric id"; return false; }
@@ -149,21 +198,27 @@ bool cfgAddComposeLine(Cfg *c, const std::string &line, std::string &err){
     if(name.empty()){ err="compose: empty name"; return false; }
     if(c->ids.count(id)){ err="compose: duplicate id "+std::to_string(id); return false; }
     if(c->names.count(name)){ err="compose: duplicate name "+name; return false; }
-    std::vector<std::string> items; std::string cur; bool inq=false;
-    for(char ch:items_s){ if(ch=='"'){inq=!inq;cur+=ch;} else if(ch==','&&!inq){items.push_back(trim(cur));cur.clear();} else cur+=ch; }
-    if(!trim(cur).empty()) items.push_back(trim(cur));
-    Template t; t.id=id; t.name=name; int pending=SPACE; std::string pendingLit; bool havePending=false;
-    for(auto &it:items){ if(it.empty()) continue;
-        if(it.size()>=2&&it.front()=='"'&&it.back()=='"'){ pending=LITERAL; pendingLit=it.substr(1,it.size()-2); havePending=true; continue; }
-        bool isC; int ck=connKeyword(it,isC); if(isC){ pending=ck; pendingLit.clear(); havePending=true; continue; }
-        Step st; st.lit=pendingLit; st.conn=t.steps.empty()?NONE:(havePending?pending:SPACE);
-        std::string item=it;
-        if(!item.empty()&&item.back()=='?'){ st.optional=true; item.pop_back(); item=trim(item); } // optional step: "entity?"
-        std::stringstream as(item); std::string alt;                                                // alternation: "a|b|c"
-        while(std::getline(as,alt,'|')){ alt=trim(alt); if(!alt.empty()) st.alts.push_back(alt); }
-        if(st.alts.empty()) continue;
-        st.entity=st.alts[0];
-        t.steps.push_back(st); pending=SPACE; pendingLit.clear(); havePending=false;
+    Template t; t.id=id; t.name=name;
+    std::string body=trim(items_s);
+    if(body.find('{')!=std::string::npos){                   // Option B brace expression (see parser above)
+        if(!parseBraceComposeExpr(c,id,body,t,err)) return false;
+    } else {                                                 // classic: comma/space-separated names + connectors
+        std::vector<std::string> items; std::string cur; bool inq=false;
+        for(char ch:items_s){ if(ch=='"'){inq=!inq;cur+=ch;} else if(ch==','&&!inq){items.push_back(trim(cur));cur.clear();} else cur+=ch; }
+        if(!trim(cur).empty()) items.push_back(trim(cur));
+        int pending=SPACE; std::string pendingLit; bool havePending=false;
+        for(auto &it:items){ if(it.empty()) continue;
+            if(it.size()>=2&&it.front()=='"'&&it.back()=='"'){ pending=LITERAL; pendingLit=it.substr(1,it.size()-2); havePending=true; continue; }
+            bool isC; int ck=connKeyword(it,isC); if(isC){ pending=ck; pendingLit.clear(); havePending=true; continue; }
+            Step st; st.lit=pendingLit; st.conn=t.steps.empty()?NONE:(havePending?pending:SPACE);
+            std::string item=it;
+            if(!item.empty()&&item.back()=='?'){ st.optional=true; item.pop_back(); item=trim(item); } // optional step: "entity?"
+            std::stringstream as(item); std::string alt;                                                // alternation: "a|b|c"
+            while(std::getline(as,alt,'|')){ alt=trim(alt); if(!alt.empty()) st.alts.push_back(alt); }
+            if(st.alts.empty()) continue;
+            st.entity=st.alts[0];
+            t.steps.push_back(st); pending=SPACE; pendingLit.clear(); havePending=false;
+        }
     }
     if(t.steps.size()<2){ err="compose "+name+": needs >=2 components"; return false; }
     for(auto &st:t.steps) for(auto &e:st.alts){
