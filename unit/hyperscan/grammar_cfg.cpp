@@ -62,6 +62,16 @@ static bool hasComposite(hs_database_t *db, const std::string &corpus,
     for (auto &e : s.m) if (e.first == id && e.second.first == from && e.second.second == to) return true;
     return false;
 }
+// True if ANY composite with `id` was emitted for `corpus` (used to assert a grammar does NOT match).
+static bool anyComposite(hs_database_t *db, const std::string &corpus, unsigned id) {
+    hs_scratch_t *scr = nullptr;
+    EXPECT_EQ(HS_SUCCESS, hs_alloc_scratch(db, &scr));
+    Sink s;
+    EXPECT_EQ(HS_SUCCESS, hs_scan(db, corpus.c_str(), corpus.size(), 0, scr, onMatch, &s));
+    hs_free_scratch(scr);
+    for (auto &e : s.m) if (e.first == id) return true;
+    return false;
+}
 
 class GrammarCFGCompose : public ::testing::Test {
 protected:
@@ -131,6 +141,71 @@ protected:
 TEST_F(GrammarCFGCompose, ValidNameFirstLast) {
     hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("names.hsg", &db));
     EXPECT_TRUE(hasComposite(db, "John Smith", 9000, 0, 10));
+    hs_free_database(db);
+}
+
+// ---- Option B brace-expression compose syntax (frontend lowering to synthetic literal entities) ----
+// Test A: the classic (non-brace) syntax keeps working unchanged.
+TEST_F(GrammarCFGCompose, BraceOldSyntaxStillWorks) {
+    writeFile("brace_old.hsg", "dict first firstname.txt\ndict last lastname.txt\n"
+                               "compose 9000 fullname: first, last\n");
+    hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("brace_old.hsg", &db));
+    EXPECT_TRUE(hasComposite(db, "John Smith", 9000, 0, 10));   // "John Smith" -> one composite
+    hs_free_database(db);
+}
+// Test B: new brace syntax with LITERAL braces required, and the space is a REQUIRED literal space.
+TEST_F(GrammarCFGCompose, BraceLiteralBraces) {
+    writeFile("brace_lit.hsg", "dict first firstname.txt\ndict last lastname.txt\n"
+                               "compose 9000 fullname: \\{{first} {last}\\}\n");   // \{{first} {last}\}
+    hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("brace_lit.hsg", &db));
+    EXPECT_TRUE(hasComposite(db, "{John Smith}", 9000, 0, 12));  // exactly "{ + first + <one space> + last + }"
+    EXPECT_FALSE(anyComposite(db, "{JohnSmith}", 9000));         // no space -> required literal space missing
+    EXPECT_FALSE(anyComposite(db, "{John  Smith}", 9000));       // two spaces != one literal space
+    EXPECT_FALSE(anyComposite(db, "{John\tSmith}", 9000));       // tab != literal space
+    EXPECT_FALSE(anyComposite(db, "John Smith", 9000));          // braces are REQUIRED -> no match
+    hs_free_database(db);
+}
+// Test C: no gap between the two refs -> NONE connector.
+TEST_F(GrammarCFGCompose, BraceNoGap) {
+    writeFile("brace_glue.hsg", "dict first firstname.txt\ndict last lastname.txt\n"
+                                "compose 9001 fullname_glued: \\{{first}{last}\\}\n"); // \{{first}{last}\}
+    hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("brace_glue.hsg", &db));
+    EXPECT_TRUE(hasComposite(db, "{JohnSmith}", 9001, 0, 11));
+    hs_free_database(db);
+}
+// Test D: a literal (dash) chunk between the two refs -> synthetic literal entity.
+TEST_F(GrammarCFGCompose, BraceLiteralConnector) {
+    writeFile("brace_dash.hsg", "dict first firstname.txt\ndict last lastname.txt\n"
+                                "compose 9002 fullname_dash: \\{{first}-{last}\\}\n"); // \{{first}-{last}\}
+    hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("brace_dash.hsg", &db));
+    EXPECT_TRUE(hasComposite(db, "{John-Smith}", 9002, 0, 12));
+    hs_free_database(db);
+}
+// Test E: embedded [entity] pattern syntax is OUT OF SCOPE and must be rejected clearly.
+TEST_F(GrammarCFGCompose, BraceRejectEmbeddedPattern) {
+    writeFile("brace_bad.hsg", "dict first firstname.txt\ndict last lastname.txt\n"
+                               "compose 9003 bad: \\{[first] [last]\\}\n");   // \{[first] [last]\}
+    hs_database_t *db = nullptr;
+    EXPECT_EQ(HS_COMPILER_ERROR, compileCompose("brace_bad.hsg", &db));       // rejected, not compiled
+    EXPECT_EQ(nullptr, db);
+}
+// Test F: a brace-case .hsg for the "{John Smith}" use-case must contain the NEW Option B syntax
+// (escaped literal braces) rather than the old comma syntax, and that exact text must behave per Option B.
+TEST_F(GrammarCFGCompose, BraceFixtureUsesNewSyntax) {
+    writeFile("brace_fixture.hsg", "dict first firstname.txt\ndict last lastname.txt\n"
+                                   "compose 9000 fullname: \\{{first} {last}\\}\n");
+    // (1) the .hsg text uses the new brace syntax, NOT the old comma syntax
+    std::ifstream in(g_dir + "/brace_fixture.hsg");
+    std::string text, line; while (std::getline(in, line)) { text += line; text += "\n"; }
+    EXPECT_NE(std::string::npos, text.find("compose 9000 fullname: \\{{first} {last}\\}"));
+    EXPECT_EQ(std::string::npos, text.find("compose 9000 fullname: first, last"));
+    // (2) that exact grammar behaves as specified: literal braces + one required literal space
+    hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("brace_fixture.hsg", &db));
+    EXPECT_TRUE(hasComposite(db, "{John Smith}", 9000, 0, 12));   // braces + single space included
+    EXPECT_FALSE(anyComposite(db, "{JohnSmith}", 9000));          // missing the required literal space
+    EXPECT_FALSE(anyComposite(db, "{John  Smith}", 9000));        // two spaces
+    EXPECT_FALSE(anyComposite(db, "{John\tSmith}", 9000));        // tab, not space
+    EXPECT_FALSE(anyComposite(db, "John Smith", 9000));           // plain text does NOT match
     hs_free_database(db);
 }
 TEST_F(GrammarCFGCompose, ValidLastCommaFirst) {
