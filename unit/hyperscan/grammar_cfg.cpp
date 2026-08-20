@@ -153,12 +153,15 @@ TEST_F(GrammarCFGCompose, BraceOldSyntaxStillWorks) {
     EXPECT_TRUE(hasComposite(db, "John Smith", 9000, 0, 10));   // "John Smith" -> one composite
     hs_free_database(db);
 }
-// Test B: new brace syntax with LITERAL braces required in the input text.
+// Test B: new brace syntax with LITERAL braces required, and the space is a REQUIRED literal space.
 TEST_F(GrammarCFGCompose, BraceLiteralBraces) {
     writeFile("brace_lit.hsg", "dict first firstname.txt\ndict last lastname.txt\n"
                                "compose 9000 fullname: \\{{first} {last}\\}\n");   // \{{first} {last}\}
     hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("brace_lit.hsg", &db));
-    EXPECT_TRUE(hasComposite(db, "{John Smith}", 9000, 0, 12));  // span covers the braces
+    EXPECT_TRUE(hasComposite(db, "{John Smith}", 9000, 0, 12));  // exactly "{ + first + <one space> + last + }"
+    EXPECT_FALSE(anyComposite(db, "{JohnSmith}", 9000));         // no space -> required literal space missing
+    EXPECT_FALSE(anyComposite(db, "{John  Smith}", 9000));       // two spaces != one literal space
+    EXPECT_FALSE(anyComposite(db, "{John\tSmith}", 9000));       // tab != literal space
     EXPECT_FALSE(anyComposite(db, "John Smith", 9000));          // braces are REQUIRED -> no match
     hs_free_database(db);
 }
@@ -196,9 +199,12 @@ TEST_F(GrammarCFGCompose, BraceFixtureUsesNewSyntax) {
     std::string text, line; while (std::getline(in, line)) { text += line; text += "\n"; }
     EXPECT_NE(std::string::npos, text.find("compose 9000 fullname: \\{{first} {last}\\}"));
     EXPECT_EQ(std::string::npos, text.find("compose 9000 fullname: first, last"));
-    // (2) that exact grammar behaves per Option B
+    // (2) that exact grammar behaves as specified: literal braces + one required literal space
     hs_database_t *db = nullptr; ASSERT_EQ(HS_SUCCESS, compileCompose("brace_fixture.hsg", &db));
-    EXPECT_TRUE(hasComposite(db, "{John Smith}", 9000, 0, 12));   // braces included in the span
+    EXPECT_TRUE(hasComposite(db, "{John Smith}", 9000, 0, 12));   // braces + single space included
+    EXPECT_FALSE(anyComposite(db, "{JohnSmith}", 9000));          // missing the required literal space
+    EXPECT_FALSE(anyComposite(db, "{John  Smith}", 9000));        // two spaces
+    EXPECT_FALSE(anyComposite(db, "{John\tSmith}", 9000));        // tab, not space
     EXPECT_FALSE(anyComposite(db, "John Smith", 9000));           // plain text does NOT match
     hs_free_database(db);
 }

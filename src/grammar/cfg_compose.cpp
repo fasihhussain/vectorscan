@@ -141,25 +141,25 @@ static int connKeyword(const std::string &s,bool &isConn){
     if(s=="initials")return INITIALS; if(s=="comma_init")return COMMA_INIT; if(s=="name")return NAME;
     isConn=false; return SPACE;
 }
-static inline bool braceSpace(char ch){ return ch==' '||ch=='\t'||ch=='\r'||ch=='\n'; }
-// Option B brace-expression compose body -> t.steps + synthetic literal entities in c->ents.
+// Brace-expression compose body -> t.steps + synthetic literal entities in c->ents.
 // Grammar:  \{ \} \\ = literal brace / backslash;  {name} = entity ref;  {name?} = optional;
-// {a|b} = alternation; whitespace between components = SPACE connector, adjacency = NONE.
-// Non-space literal chunks (leading / middle / trailing) become synthetic single-literal entities
-// (`__cfg_lit_<id>_<k>`) added to c->ents, so cfgCompile compiles them like normal components and the
-// existing cfg_scan_dispatch offset-join handles everything with NO runtime change.
+// {a|b} = alternation. Every literal chunk between/around refs -- INCLUDING whitespace (a normal
+// space, tab, etc.) -- is treated as LITERAL TEXT and lowered into a synthetic single-literal entity
+// (`__cfg_lit_<id>_<k>`) in c->ents. So a space in the grammar means a REQUIRED literal space in the
+// input, NOT a flexible SPACE connector. All steps use adjacency (conn = NONE): the explicit literal
+// characters now model the separators. cfgCompile compiles the synthetic literals like normal
+// components and the existing cfg_scan_dispatch offset-join handles everything with NO runtime change.
 // `[entity]` embedded-pattern syntax is OUT OF SCOPE and rejected.
 static bool parseBraceComposeExpr(Cfg *c, unsigned id, const std::string &body,
                                   Template &t, std::string &err){
-    std::string litbuf; int litIdx=0; bool pendingSpace=false;
-    auto flushLit=[&](){
+    std::string litbuf; int litIdx=0;
+    auto flushLit=[&](){                                     // a literal chunk -> synthetic entity, conn NONE
         if(litbuf.empty()) return;
         std::string nm="__cfg_lit_"+std::to_string(id)+"_"+std::to_string(litIdx++);
         c->ents[nm]=std::vector<std::string>{litbuf};       // synthetic single-literal component dict
-        Step st; st.entity=nm; st.alts.push_back(nm);
-        st.conn = t.steps.empty()?NONE:(pendingSpace?SPACE:NONE);
+        Step st; st.entity=nm; st.alts.push_back(nm); st.conn=NONE;
         t.steps.push_back(std::move(st));
-        litbuf.clear(); pendingSpace=false;
+        litbuf.clear();
     };
     size_t i=0,n=body.size();
     while(i<n){
@@ -168,7 +168,6 @@ static bool parseBraceComposeExpr(Cfg *c, unsigned id, const std::string &body,
             if(i+1<n&&(body[i+1]=='{'||body[i+1]=='}'||body[i+1]=='\\')){ litbuf+=body[i+1]; i+=2; continue; }
             err="compose "+t.name+": invalid escape (only \\{ \\} \\\\ allowed)"; return false;
         }
-        if(braceSpace(ch)){ flushLit(); pendingSpace=true; i++; continue; }   // whitespace = SPACE connector
         if(ch=='['){ err="embedded [entity] pattern syntax is out of scope"; return false; }
         if(ch=='}'){ err="compose "+t.name+": unexpected '}' (use \\} for a literal brace)"; return false; }
         if(ch=='{'){                                         // entity reference {name} / {name?} / {a|b}
@@ -177,15 +176,15 @@ static bool parseBraceComposeExpr(Cfg *c, unsigned id, const std::string &body,
             if(j==std::string::npos){ err="compose "+t.name+": unclosed '{'"; return false; }
             std::string ref=trim(body.substr(i+1,j-(i+1)));
             if(ref.find('[')!=std::string::npos){ err="embedded [entity] pattern syntax is out of scope"; return false; }
-            Step st; st.conn=t.steps.empty()?NONE:(pendingSpace?SPACE:NONE);
+            Step st; st.conn=NONE;
             if(!ref.empty()&&ref.back()=='?'){ st.optional=true; ref.pop_back(); ref=trim(ref); }
             std::stringstream as(ref); std::string alt;
             while(std::getline(as,alt,'|')){ alt=trim(alt); if(!alt.empty()) st.alts.push_back(alt); }
             if(st.alts.empty()){ err="compose "+t.name+": empty {} reference"; return false; }
             st.entity=st.alts[0]; t.steps.push_back(std::move(st));
-            pendingSpace=false; i=j+1; continue;
+            i=j+1; continue;
         }
-        litbuf+=ch; i++;                                     // ordinary literal char (e.g. '-')
+        litbuf+=ch; i++;                                     // ordinary literal char, INCLUDING whitespace
     }
     flushLit();                                              // trailing literal chunk
     return true;
